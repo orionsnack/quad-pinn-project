@@ -1,13 +1,19 @@
 """
-pinn_wind_correction_test.py(강풍 1개 조건)의 다중 조건 버전.
-여러 바람 조건(calm/light/default/strong/crosswind) 각각에 대해 "보정 OFF" ->
-"보정 ON"을 순서대로 돌려서, PINN 가속도 피드포워드 보정의 효과가 특정 조건에서만
-우연히 좋았던 게 아니라 여러 조건에서 일관되게 나타나는지 확인.
+PINN 가속도 피드포워드 보정의 두 하이퍼파라미터(`ACCEL_GAIN`, `WIND_DEADBAND_MPS`)를
+체계적으로 스윕하는 스크립트. 지금까지 두 값 다 손으로 정한 값(0.15 / 1.0)이었고,
+gust A/B 검증(pinn_wind_correction_gust_sweep.py)에서 약한 gust(light_gust)만
+deadband로 못 걸러진 잡음 때문에 손해를 봤음 (README.md 12-7절).
 
-한 번의 이륙-착륙 세션 안에서 전부 처리. 조건마다:
-  무풍 안정화 -> 바람 온셋 -> 보정 OFF로 15초 관찰 -> 무풍으로 복귀 -> 무풍 안정화
-  -> 같은 바람 다시 온셋 -> 보정 ON으로 15초 관찰
-끝나면 조건별 peak_pos_error(OFF vs ON)와 개선율을 표로 요약.
+모든 조건 x 모든 파라미터 조합을 다 돌리면 시간이 너무 오래 걸리므로, 각 파라미터가
+가장 민감하게 반응할 대표 조건만 골라서 one-factor-at-a-time 방식으로 스윕:
+  - deadband 스윕: light(고정) + light_gust — 문제가 드러난 "약한 바람" 대역.
+    ACCEL_GAIN은 현재 기본값(0.15)로 고정.
+  - gain 스윕: default(고정) + strong(고정) — 보정 효과가 크게 나타나는 대역이라
+    gain을 올렸을 때 개선폭이 더 커지는지, 너무 키우면 roll/pitch가 흔들리기
+    시작하는지 확인. WIND_DEADBAND_MPS는 현재 기본값(1.0)로 고정.
+
+각 조건마다 OFF 트라이얼은 파라미터에 안 좌우되므로(보정 자체가 꺼져 있음) 1번만
+측정하고, 그 baseline 대비 각 파라미터 값에서의 ON 트라이얼들을 비교함.
 
 실행 전 조건: WSL에서 PX4 SITL이 windy 월드로 돌고 있어야 함
 (HEADLESS=1 make px4_sitl gz_x500_windy)
@@ -16,6 +22,7 @@ pinn_wind_correction_test.py(강풍 1개 조건)의 다중 조건 버전.
 import asyncio
 import csv
 import datetime
+import math
 import sys
 import time
 from pathlib import Path
@@ -32,17 +39,25 @@ from train_wind_estimator import WindPINN, WINDOW, FEATURES, yaw_decompose  # no
 # 실험 파라미터
 # ============================================================
 WORLD_NAME = "windy"
-WIND_CONDITIONS = [
-    ("calm", 0.0, 0.0),
-    ("light", 2.0, 1.0),
-    ("default", 5.0, 2.0),
-    ("strong", 8.0, 3.0),
-    ("crosswind", 0.0, 6.0),
+
+# (label, base_vx, base_vy, amp_fraction, period_s) - amp_fraction=0이면 고정바람
+DEADBAND_PROBE_CONDITIONS = [
+    ("light_fixed", 2.0, 1.0, 0.0, 1.0),
+    ("light_gust", 2.0, 1.0, 0.6, 6.0),
 ]
-ACCEL_GAIN = 0.15  # 체계적 튜닝 스윕에서 0.20/deadband 조정을 시도했으나 전체 조건
-MAX_ACCEL_MPS2 = 2.0    # 기준으로는 원래 값이 더 균형 잡힌 것으로 확인됨 (12-8절 참고)
-WIND_DEADBAND_MPS = 1.0  # calm에서 추정 잡음만으로 보정이 살짝 손해보던 문제 완화용
-TRIAL_DURATION_S = 15.0
+GAIN_PROBE_CONDITIONS = [
+    ("default_fixed", 5.0, 2.0, 0.0, 1.0),
+    ("strong_fixed", 8.0, 3.0, 0.0, 1.0),
+]
+
+DEADBAND_VALUES = [0.5, 1.0, 1.5, 2.0]
+ACCEL_GAIN_VALUES = [0.05, 0.10, 0.15, 0.20, 0.30]
+
+ACCEL_GAIN_DEFAULT = 0.15   # deadband 스윕 중 고정
+WIND_DEADBAND_DEFAULT = 1.0  # gain 스윕 중 고정
+MAX_ACCEL_MPS2 = 2.0
+
+TRIAL_DURATION_S = 18.0
 CALM_SETTLE_S = 3.0
 PHASE_GAP_S = 2.0
 SAFE_ALTITUDE_M = 1.5
@@ -50,6 +65,7 @@ TAKEOFF_TIMEOUT_S = 15.0
 LOG_INTERVAL_S = 0.05
 SEND_RATE_HZ = 20.0
 SEND_PERIOD_S = 1.0 / SEND_RATE_HZ
+GUST_UPDATE_INTERVAL_S = 1.0
 
 MODEL_PATH = Path(__file__).parent.parent / "offline_training" / "wind_estimator.pt"
 
@@ -61,6 +77,19 @@ async def set_wind(vx, vy, vz=0.0):
         "-p", f"linear_velocity: {{x: {vx}, y: {vy}, z: {vz}}}, enable_wind: true",
     )
     await proc.wait()
+
+
+def wind_at(cond, t):
+    """cond: (label, base_vx, base_vy, amp_fraction, period_s). amp_fraction=0이면
+    고정바람(방향/크기 불변), 아니면 크기만 사인파로 진동(방향 고정)."""
+    _, base_vx, base_vy, amp_fraction, period_s = cond
+    base_speed = math.hypot(base_vx, base_vy)
+    if base_speed < 1e-9:
+        return 0.0, 0.0
+    ux, uy = base_vx / base_speed, base_vy / base_speed
+    speed = base_speed * (1.0 + amp_fraction * math.sin(2 * math.pi * t / period_s))
+    speed = max(speed, 0.0)
+    return speed * ux, speed * uy
 
 
 class WindCorrector:
@@ -102,8 +131,6 @@ class EmaSmoother:
 
 
 def apply_deadband(wind_n, wind_e, deadband):
-    """speed<=deadband면 (0,0), 그 이상이면 방향 유지한 채 크기만
-    (speed-deadband)만큼으로 줄임 - 문턱값에서 뚝 끊기지 않고 연속적으로 이어짐."""
     speed = (wind_n ** 2 + wind_e ** 2) ** 0.5
     if speed <= deadband or speed == 0.0:
         return 0.0, 0.0
@@ -230,30 +257,39 @@ async def run():
     sender_task = asyncio.create_task(offboard_sender())
 
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = f"../logs/pinn_correction_sweep_{timestamp_str}.csv"
+    csv_path = f"../logs/pinn_correction_param_tuning_{timestamp_str}.csv"
     csv_file = open(csv_path, "w", newline="")
     writer = csv.writer(csv_file)
     writer.writerow([
-        "wind_label", "phase", "t_s", "wind_est_north", "wind_est_east",
-        "accel_n_m_s2", "accel_e_m_s2",
-        "actual_north_m", "actual_east_m", "pos_error_m",
-        "roll_deg", "pitch_deg",
+        "sweep_phase", "wind_label", "param_name", "param_value", "trial_phase", "t_s",
+        "wind_est_north", "wind_est_east", "accel_n_m_s2", "accel_e_m_s2",
+        "actual_north_m", "actual_east_m", "pos_error_m", "roll_deg", "pitch_deg",
     ])
     print(f"\nCSV 로그 저장 경로: {csv_path}")
 
-    async def run_trial(wind_label, phase_name, use_correction):
+    updates_per_log = max(1, round(GUST_UPDATE_INTERVAL_S / LOG_INTERVAL_S))
+
+    async def run_trial(sweep_phase, wind_label, param_name, param_value,
+                         trial_phase, use_correction, cond, deadband, gain):
         corrector.buffer.clear()
         smoother_n = EmaSmoother(time_constant_s=0.4, dt_s=LOG_INTERVAL_S)
         smoother_e = EmaSmoother(time_constant_s=0.4, dt_s=LOG_INTERVAL_S)
         n_steps = int(TRIAL_DURATION_S / LOG_INTERVAL_S)
         next_log = time.monotonic()
         peak_error = 0.0
+        max_roll, max_pitch = 0.0, 0.0
 
         for i in range(n_steps):
             t = i * LOG_INTERVAL_S
+            true_vx, true_vy = wind_at(cond, t)
+            if i % updates_per_log == 0:
+                await set_wind(true_vx, true_vy)
+
             north, east = latest_pv["north"], latest_pv["east"]
             vn, ve = latest_pv["vn"], latest_pv["ve"]
             roll, pitch, yaw = latest_att["roll"], latest_att["pitch"], latest_att["yaw"]
+            max_roll = max(max_roll, abs(roll))
+            max_pitch = max(max_pitch, abs(pitch))
 
             r_cos, r_sin, p_cos, p_sin = yaw_decompose(roll, pitch, yaw)
             feat = {"vn_m_s": vn, "ve_m_s": ve, "roll_cos_yaw": r_cos, "roll_sin_yaw": r_sin,
@@ -265,9 +301,9 @@ async def run():
                 raw_n, raw_e = corrector.estimate_wind_ned()
                 wind_n = smoother_n.update(raw_n)
                 wind_e = smoother_e.update(raw_e)
-                wind_n, wind_e = apply_deadband(wind_n, wind_e, WIND_DEADBAND_MPS)
-                accel_n = max(-MAX_ACCEL_MPS2, min(MAX_ACCEL_MPS2, -ACCEL_GAIN * wind_n))
-                accel_e = max(-MAX_ACCEL_MPS2, min(MAX_ACCEL_MPS2, -ACCEL_GAIN * wind_e))
+                wind_n, wind_e = apply_deadband(wind_n, wind_e, deadband)
+                accel_n = max(-MAX_ACCEL_MPS2, min(MAX_ACCEL_MPS2, -gain * wind_n))
+                accel_e = max(-MAX_ACCEL_MPS2, min(MAX_ACCEL_MPS2, -gain * wind_e))
                 current_cmd["accel_n"] = accel_n
                 current_cmd["accel_e"] = accel_e
             else:
@@ -278,7 +314,8 @@ async def run():
             peak_error = max(peak_error, pos_error)
 
             writer.writerow([
-                wind_label, phase_name, f"{t:.2f}", f"{wind_n:.2f}", f"{wind_e:.2f}",
+                sweep_phase, wind_label, param_name, param_value, trial_phase, f"{t:.2f}",
+                f"{wind_n:.2f}", f"{wind_e:.2f}",
                 f"{current_cmd['accel_n']:.3f}", f"{current_cmd['accel_e']:.3f}",
                 f"{north:.3f}", f"{east:.3f}", f"{pos_error:.3f}",
                 f"{roll:.2f}", f"{pitch:.2f}",
@@ -291,54 +328,75 @@ async def run():
             else:
                 next_log = time.monotonic()
 
-        return peak_error
+        return peak_error, max_roll, max_pitch
 
-    results = []
-    for wind_label, wind_vx, wind_vy in WIND_CONDITIONS:
-        print(f"\n{'='*60}\n=== 바람 조건: {wind_label} (vx={wind_vx}, vy={wind_vy}) ===\n{'='*60}")
-
-        print("  -- 보정 OFF --")
-        await set_wind(0.0, 0.0)
-        await asyncio.sleep(CALM_SETTLE_S)
-        nominal["north"] = latest_pv["north"]
-        nominal["east"] = latest_pv["east"]
-        await set_wind(wind_vx, wind_vy)
-        peak_off = await run_trial(wind_label, "correction_off", use_correction=False)
-        print(f"    peak_pos_error(OFF) = {peak_off:.3f}m")
-
+    async def settle_and_capture_nominal():
         await set_wind(0.0, 0.0)
         current_cmd["accel_n"] = 0.0
         current_cmd["accel_e"] = 0.0
-        await asyncio.sleep(PHASE_GAP_S)
-
-        print("  -- 보정 ON --")
         await asyncio.sleep(CALM_SETTLE_S)
         nominal["north"] = latest_pv["north"]
         nominal["east"] = latest_pv["east"]
-        await set_wind(wind_vx, wind_vy)
-        peak_on = await run_trial(wind_label, "correction_on", use_correction=True)
-        print(f"    peak_pos_error(ON)  = {peak_on:.3f}m")
 
-        improvement = (peak_off - peak_on) / peak_off * 100 if peak_off > 1e-6 else 0.0
-        print(f"    개선율 = {improvement:+.1f}%")
-        results.append((wind_label, wind_vx, wind_vy, peak_off, peak_on, improvement))
+    deadband_results = []
+    print(f"\n{'#'*70}\n# 1부: WIND_DEADBAND_MPS 스윕 (ACCEL_GAIN={ACCEL_GAIN_DEFAULT} 고정)\n{'#'*70}")
+    for cond in DEADBAND_PROBE_CONDITIONS:
+        label = cond[0]
+        print(f"\n=== 조건: {label} ===")
 
-        await set_wind(0.0, 0.0)
-        current_cmd["accel_n"] = 0.0
-        current_cmd["accel_e"] = 0.0
+        await settle_and_capture_nominal()
+        peak_off, _, _ = await run_trial("deadband", label, "baseline_off", 0.0,
+                                          "off", False, cond, WIND_DEADBAND_DEFAULT, ACCEL_GAIN_DEFAULT)
+        print(f"  OFF baseline peak = {peak_off:.3f}m")
         await asyncio.sleep(PHASE_GAP_S)
+
+        for db in DEADBAND_VALUES:
+            await settle_and_capture_nominal()
+            peak_on, max_roll, max_pitch = await run_trial(
+                "deadband", label, "deadband_mps", db, "on", True, cond, db, ACCEL_GAIN_DEFAULT)
+            improvement = (peak_off - peak_on) / peak_off * 100 if peak_off > 1e-6 else 0.0
+            print(f"  deadband={db:.1f}  peak_ON={peak_on:.3f}m  개선율={improvement:+.1f}%  "
+                  f"max|roll|={max_roll:.1f} max|pitch|={max_pitch:.1f}")
+            deadband_results.append((label, db, peak_off, peak_on, improvement, max_roll, max_pitch))
+            await asyncio.sleep(PHASE_GAP_S)
+
+    gain_results = []
+    print(f"\n{'#'*70}\n# 2부: ACCEL_GAIN 스윕 (WIND_DEADBAND_MPS={WIND_DEADBAND_DEFAULT} 고정)\n{'#'*70}")
+    for cond in GAIN_PROBE_CONDITIONS:
+        label = cond[0]
+        print(f"\n=== 조건: {label} ===")
+
+        await settle_and_capture_nominal()
+        peak_off, _, _ = await run_trial("gain", label, "baseline_off", 0.0,
+                                          "off", False, cond, WIND_DEADBAND_DEFAULT, ACCEL_GAIN_DEFAULT)
+        print(f"  OFF baseline peak = {peak_off:.3f}m")
+        await asyncio.sleep(PHASE_GAP_S)
+
+        for gain in ACCEL_GAIN_VALUES:
+            await settle_and_capture_nominal()
+            peak_on, max_roll, max_pitch = await run_trial(
+                "gain", label, "accel_gain", gain, "on", True, cond, WIND_DEADBAND_DEFAULT, gain)
+            improvement = (peak_off - peak_on) / peak_off * 100 if peak_off > 1e-6 else 0.0
+            print(f"  gain={gain:.2f}  peak_ON={peak_on:.3f}m  개선율={improvement:+.1f}%  "
+                  f"max|roll|={max_roll:.1f} max|pitch|={max_pitch:.1f}")
+            gain_results.append((label, gain, peak_off, peak_on, improvement, max_roll, max_pitch))
+            await asyncio.sleep(PHASE_GAP_S)
 
     csv_file.close()
 
-    print(f"\n{'='*70}\n=== 전체 요약 ===\n{'='*70}")
-    print(f"{'조건':10s} {'풍속(m/s)':>10s} {'OFF peak':>10s} {'ON peak':>10s} {'개선율':>8s}")
-    for label, vx, vy, off, on, imp in results:
-        speed = (vx**2 + vy**2) ** 0.5
-        print(f"{label:10s} {speed:10.2f} {off:10.3f} {on:10.3f} {imp:+7.1f}%")
+    print(f"\n{'='*78}\n=== 요약 1: WIND_DEADBAND_MPS 스윕 ===\n{'='*78}")
+    print(f"{'조건':14s} {'deadband':>9s} {'OFF peak':>9s} {'ON peak':>9s} {'개선율':>8s} "
+          f"{'max|roll|':>10s} {'max|pitch|':>11s}")
+    for label, db, off, on, imp, mr, mp in deadband_results:
+        print(f"{label:14s} {db:9.1f} {off:9.3f} {on:9.3f} {imp:+7.1f}% {mr:10.1f} {mp:11.1f}")
 
-    n_improved = sum(1 for r in results if r[5] > 0)
-    print(f"\n개선된 조건: {n_improved}/{len(results)}")
-    print(f"CSV 저장됨: {csv_path}")
+    print(f"\n{'='*78}\n=== 요약 2: ACCEL_GAIN 스윕 ===\n{'='*78}")
+    print(f"{'조건':14s} {'gain':>9s} {'OFF peak':>9s} {'ON peak':>9s} {'개선율':>8s} "
+          f"{'max|roll|':>10s} {'max|pitch|':>11s}")
+    for label, gain, off, on, imp, mr, mp in gain_results:
+        print(f"{label:14s} {gain:9.2f} {off:9.3f} {on:9.3f} {imp:+7.1f}% {mr:10.1f} {mp:11.1f}")
+
+    print(f"\nCSV 저장됨: {csv_path}")
 
     if send_gaps:
         n_over = sum(1 for g in send_gaps if g > 1.5 * SEND_PERIOD_S)
@@ -372,7 +430,7 @@ async def run():
             print("-> 착륙 완료 및 디스암 확인")
             break
 
-    print("\nPINN 보정 스윕 테스트 완료.")
+    print("\nPINN 보정 파라미터 튜닝 스윕 완료.")
 
 
 if __name__ == "__main__":

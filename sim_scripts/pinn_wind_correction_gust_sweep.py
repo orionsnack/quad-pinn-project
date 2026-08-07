@@ -1,13 +1,19 @@
 """
-pinn_wind_correction_test.py(강풍 1개 조건)의 다중 조건 버전.
-여러 바람 조건(calm/light/default/strong/crosswind) 각각에 대해 "보정 OFF" ->
-"보정 ON"을 순서대로 돌려서, PINN 가속도 피드포워드 보정의 효과가 특정 조건에서만
-우연히 좋았던 게 아니라 여러 조건에서 일관되게 나타나는지 확인.
+pinn_wind_correction_sweep.py(고정 바람 5조건)의 gust 버전.
+지금까지 PINN 가속도 피드포워드 보정의 A/B 검증은 전부 "트라이얼 내내 바람이
+고정"인 조건에서만 했음 (12-5절). 실제 바람은 계속 변하므로, 바람이 사인파로
+계속 출렁이는 gust 조건에서도 보정이 여전히 도움이 되는지 확인하는 스크립트.
 
-한 번의 이륙-착륙 세션 안에서 전부 처리. 조건마다:
-  무풍 안정화 -> 바람 온셋 -> 보정 OFF로 15초 관찰 -> 무풍으로 복귀 -> 무풍 안정화
-  -> 같은 바람 다시 온셋 -> 보정 ON으로 15초 관찰
-끝나면 조건별 peak_pos_error(OFF vs ON)와 개선율을 표로 요약.
+바람 모델 (조건마다 고정, wind_gust_sweep.py의 방향은 유지하되 진폭만 사인파로 출렁임):
+  speed(t) = base_speed + base_speed*AMP_FRACTION*sin(2*pi*t/PERIOD_S)
+  방향은 base_vx/base_vy로 고정 (pinn_wind_correction_sweep.py의 조건과 동일 방향).
+Gazebo에는 GUST_UPDATE_INTERVAL_S 간격으로만 갱신(계단식 근사, wind_gust_sweep.py와
+동일한 이유 - gz topic pub 프로세스 spawn 비용).
+
+주의: gust 조건에서는 PINN의 풍속 추정 오차 자체가 이미 크다는 게 알려져 있음
+(README.md 12-6절: 고정바람 0.37~0.5m/s -> gust 포함 1.8m/s). 따라서 이 실험은
+"추정이 부정확한 상황에서도 보정이 여전히 순이익인가"를 확인하는 것이지, 고정바람
+수준의 개선율을 기대하는 게 아님.
 
 실행 전 조건: WSL에서 PX4 SITL이 windy 월드로 돌고 있어야 함
 (HEADLESS=1 make px4_sitl gz_x500_windy)
@@ -16,6 +22,7 @@ pinn_wind_correction_test.py(강풍 1개 조건)의 다중 조건 버전.
 import asyncio
 import csv
 import datetime
+import math
 import sys
 import time
 from pathlib import Path
@@ -32,17 +39,21 @@ from train_wind_estimator import WindPINN, WINDOW, FEATURES, yaw_decompose  # no
 # 실험 파라미터
 # ============================================================
 WORLD_NAME = "windy"
-WIND_CONDITIONS = [
-    ("calm", 0.0, 0.0),
-    ("light", 2.0, 1.0),
-    ("default", 5.0, 2.0),
-    ("strong", 8.0, 3.0),
-    ("crosswind", 0.0, 6.0),
+# (label, base_vx, base_vy, amp_fraction, period_s)
+# base_vx/base_vy는 pinn_wind_correction_sweep.py의 light/default/strong/crosswind와
+# 동일한 방향 - 고정바람 결과와 나란히 비교하기 위함. calm은 base_speed=0이라 방향이
+# 정의 안 되므로 gust 버전에서는 제외.
+GUST_CONDITIONS = [
+    ("light_gust", 2.0, 1.0, 0.6, 6.0),
+    ("default_gust", 5.0, 2.0, 0.6, 6.0),
+    ("strong_gust", 8.0, 3.0, 0.6, 6.0),
+    ("crosswind_gust", 0.0, 6.0, 0.6, 6.0),
 ]
 ACCEL_GAIN = 0.15  # 체계적 튜닝 스윕에서 0.20/deadband 조정을 시도했으나 전체 조건
 MAX_ACCEL_MPS2 = 2.0    # 기준으로는 원래 값이 더 균형 잡힌 것으로 확인됨 (12-8절 참고)
-WIND_DEADBAND_MPS = 1.0  # calm에서 추정 잡음만으로 보정이 살짝 손해보던 문제 완화용
-TRIAL_DURATION_S = 15.0
+WIND_DEADBAND_MPS = 1.0
+TRIAL_DURATION_S = 18.0  # period 6s * 3주기
+GUST_UPDATE_INTERVAL_S = 1.0
 CALM_SETTLE_S = 3.0
 PHASE_GAP_S = 2.0
 SAFE_ALTITUDE_M = 1.5
@@ -61,6 +72,19 @@ async def set_wind(vx, vy, vz=0.0):
         "-p", f"linear_velocity: {{x: {vx}, y: {vy}, z: {vz}}}, enable_wind: true",
     )
     await proc.wait()
+
+
+def wind_at(cond, t):
+    """cond: (label, base_vx, base_vy, amp_fraction, period_s). 방향은 base_vx/base_vy
+    고정, 크기만 사인파로 진동. speed는 amp_fraction<1이면 항상 양수 유지됨."""
+    _, base_vx, base_vy, amp_fraction, period_s = cond
+    base_speed = math.hypot(base_vx, base_vy)
+    if base_speed < 1e-9:
+        return 0.0, 0.0
+    ux, uy = base_vx / base_speed, base_vy / base_speed
+    speed = base_speed * (1.0 + amp_fraction * math.sin(2 * math.pi * t / period_s))
+    speed = max(speed, 0.0)
+    return speed * ux, speed * uy
 
 
 class WindCorrector:
@@ -230,18 +254,21 @@ async def run():
     sender_task = asyncio.create_task(offboard_sender())
 
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = f"../logs/pinn_correction_sweep_{timestamp_str}.csv"
+    csv_path = f"../logs/pinn_correction_gust_sweep_{timestamp_str}.csv"
     csv_file = open(csv_path, "w", newline="")
     writer = csv.writer(csv_file)
     writer.writerow([
-        "wind_label", "phase", "t_s", "wind_est_north", "wind_est_east",
+        "wind_label", "phase", "t_s", "true_wind_north_m_s", "true_wind_east_m_s",
+        "wind_est_north", "wind_est_east",
         "accel_n_m_s2", "accel_e_m_s2",
         "actual_north_m", "actual_east_m", "pos_error_m",
         "roll_deg", "pitch_deg",
     ])
     print(f"\nCSV 로그 저장 경로: {csv_path}")
 
-    async def run_trial(wind_label, phase_name, use_correction):
+    updates_per_log = max(1, round(GUST_UPDATE_INTERVAL_S / LOG_INTERVAL_S))
+
+    async def run_trial(wind_label, phase_name, use_correction, cond):
         corrector.buffer.clear()
         smoother_n = EmaSmoother(time_constant_s=0.4, dt_s=LOG_INTERVAL_S)
         smoother_e = EmaSmoother(time_constant_s=0.4, dt_s=LOG_INTERVAL_S)
@@ -251,6 +278,10 @@ async def run():
 
         for i in range(n_steps):
             t = i * LOG_INTERVAL_S
+            true_vx, true_vy = wind_at(cond, t)  # ENU (x=East, y=North)
+            if i % updates_per_log == 0:
+                await set_wind(true_vx, true_vy)
+
             north, east = latest_pv["north"], latest_pv["east"]
             vn, ve = latest_pv["vn"], latest_pv["ve"]
             roll, pitch, yaw = latest_att["roll"], latest_att["pitch"], latest_att["yaw"]
@@ -278,7 +309,8 @@ async def run():
             peak_error = max(peak_error, pos_error)
 
             writer.writerow([
-                wind_label, phase_name, f"{t:.2f}", f"{wind_n:.2f}", f"{wind_e:.2f}",
+                wind_label, phase_name, f"{t:.2f}", f"{true_vy:.3f}", f"{true_vx:.3f}",
+                f"{wind_n:.2f}", f"{wind_e:.2f}",
                 f"{current_cmd['accel_n']:.3f}", f"{current_cmd['accel_e']:.3f}",
                 f"{north:.3f}", f"{east:.3f}", f"{pos_error:.3f}",
                 f"{roll:.2f}", f"{pitch:.2f}",
@@ -294,16 +326,19 @@ async def run():
         return peak_error
 
     results = []
-    for wind_label, wind_vx, wind_vy in WIND_CONDITIONS:
-        print(f"\n{'='*60}\n=== 바람 조건: {wind_label} (vx={wind_vx}, vy={wind_vy}) ===\n{'='*60}")
+    for cond in GUST_CONDITIONS:
+        wind_label, base_vx, base_vy, amp_fraction, period_s = cond
+        base_speed = math.hypot(base_vx, base_vy)
+        print(f"\n{'='*70}\n=== gust 조건: {wind_label} "
+              f"(base={base_speed:.1f}m/s, amp={amp_fraction*100:.0f}%, period={period_s:.0f}s) "
+              f"===\n{'='*70}")
 
         print("  -- 보정 OFF --")
         await set_wind(0.0, 0.0)
         await asyncio.sleep(CALM_SETTLE_S)
         nominal["north"] = latest_pv["north"]
         nominal["east"] = latest_pv["east"]
-        await set_wind(wind_vx, wind_vy)
-        peak_off = await run_trial(wind_label, "correction_off", use_correction=False)
+        peak_off = await run_trial(wind_label, "correction_off", False, cond)
         print(f"    peak_pos_error(OFF) = {peak_off:.3f}m")
 
         await set_wind(0.0, 0.0)
@@ -315,13 +350,12 @@ async def run():
         await asyncio.sleep(CALM_SETTLE_S)
         nominal["north"] = latest_pv["north"]
         nominal["east"] = latest_pv["east"]
-        await set_wind(wind_vx, wind_vy)
-        peak_on = await run_trial(wind_label, "correction_on", use_correction=True)
+        peak_on = await run_trial(wind_label, "correction_on", True, cond)
         print(f"    peak_pos_error(ON)  = {peak_on:.3f}m")
 
         improvement = (peak_off - peak_on) / peak_off * 100 if peak_off > 1e-6 else 0.0
         print(f"    개선율 = {improvement:+.1f}%")
-        results.append((wind_label, wind_vx, wind_vy, peak_off, peak_on, improvement))
+        results.append((wind_label, base_speed, peak_off, peak_on, improvement))
 
         await set_wind(0.0, 0.0)
         current_cmd["accel_n"] = 0.0
@@ -330,13 +364,12 @@ async def run():
 
     csv_file.close()
 
-    print(f"\n{'='*70}\n=== 전체 요약 ===\n{'='*70}")
-    print(f"{'조건':10s} {'풍속(m/s)':>10s} {'OFF peak':>10s} {'ON peak':>10s} {'개선율':>8s}")
-    for label, vx, vy, off, on, imp in results:
-        speed = (vx**2 + vy**2) ** 0.5
-        print(f"{label:10s} {speed:10.2f} {off:10.3f} {on:10.3f} {imp:+7.1f}%")
+    print(f"\n{'='*70}\n=== 전체 요약 (gust 조건) ===\n{'='*70}")
+    print(f"{'조건':16s} {'base(m/s)':>10s} {'OFF peak':>10s} {'ON peak':>10s} {'개선율':>8s}")
+    for label, base_speed, off, on, imp in results:
+        print(f"{label:16s} {base_speed:10.2f} {off:10.3f} {on:10.3f} {imp:+7.1f}%")
 
-    n_improved = sum(1 for r in results if r[5] > 0)
+    n_improved = sum(1 for r in results if r[4] > 0)
     print(f"\n개선된 조건: {n_improved}/{len(results)}")
     print(f"CSV 저장됨: {csv_path}")
 
@@ -372,7 +405,7 @@ async def run():
             print("-> 착륙 완료 및 디스암 확인")
             break
 
-    print("\nPINN 보정 스윕 테스트 완료.")
+    print("\nPINN 보정 gust 스윕 테스트 완료.")
 
 
 if __name__ == "__main__":

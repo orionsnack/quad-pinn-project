@@ -1,21 +1,18 @@
 """
-PINN 바람 추정 모델 학습용 데이터 수집.
-wind_sweep_baseline.py(고정 5조건)보다 훨씬 다양한 바람 조건(무작위 세기/방향)을
-많이 훑어서, offline_training/의 PINN이 일반화 가능하도록 학습 데이터를 만든다.
+yaw 일반화 검증용 데이터 수집.
 
-yaw(기수 방향)도 그리드로 훑음 (2026-08-08 추가): 원래는 SITL 스폰 방향(거의 고정)
-에서만 데이터를 모았는데, 그 상태로 학습한 모델이 다른 yaw에서 거의 못 쓸 정도로
-안 통한다는 게 확인됨 (offline_training/train_wind_estimator.py "주의 2" 참고).
-N_YAW개 방향으로 고르게 회전해가며, 각 방향에서 N_PER_YAW개의 무작위 바람 조건을
-수집 - yaw는 그리드(고른 커버리지가 중요), 바람은 무작위(다양성이 중요)로 설계.
-`--yaw-offset`으로 그리드 시작점을 밀 수 있음 - 한 세션의 그리드를 너무 촘촘하게
-(N_YAW를 너무 크게) 잡으면 세션 하나가 너무 길어져 SITL 드리프트 위험 구간에
-들어가므로, 대신 여러 세션을 서로 다른 offset으로 짧게 나눠 돌려서 합쳤을 때
-촘촘해지도록 설계함 (run_yaw_collection_sessions.sh가 세션마다 offset을 자동 계산).
+지금까지 모든 학습 데이터(wind_random_*.csv, wind_gust_*.csv)는 SITL 스폰 방향이
+거의 고정이라 yaw가 75~93도 좁은 범위에만 몰려있었음 (train_wind_estimator.py의
+"주의 2" 참고). roll/pitch를 yaw로 회전시켜 tilt_north/tilt_east feature로 바꾸는
+수정(body_tilt_to_inertial)을 했지만, 실제로 다른 yaw에서도 통하는지는 검증한 적이
+없었음 - 이 스크립트가 그 검증용 데이터를 모음.
 
-한 번의 이륙-착륙 세션 안에서 전부 처리. 각 yaw 그룹의 (wind_vx, wind_vy)는 우리가
-gz topic으로 직접 설정한 값이므로 100% 정확한 정답 라벨로 CSV에 같이 기록됨
-(지도학습 가능).
+wind_random_sweep.py와 거의 동일한 구조지만:
+  1) 이륙 후 먼저 TARGET_YAW_DEG(기본 0도 = 북쪽, 학습 범위와 확실히 다른 방향)로
+     회전시키고 그 상태를 유지하며 데이터를 모음
+  2) 조건 수가 훨씬 적음(기본 8개) - 정식 학습용이 아니라 스팟체크용
+CSV는 wind_random_*/wind_gust_* 글롭 패턴에 안 걸리는 wind_yawtest_ 접두사를 씀
+(의도치 않게 학습에 섞여 들어가지 않도록).
 
 실행 전 조건: WSL에서 PX4 SITL이 windy 월드로 돌고 있어야 함
 (HEADLESS=1 make px4_sitl gz_x500_windy)
@@ -36,13 +33,10 @@ from mavsdk.offboard import (OffboardError, PositionNedYaw)
 # 실험 파라미터
 # ============================================================
 WORLD_NAME = "windy"
-N_YAW = 24                            # 0~345도, 15도 간격으로 고르게 (--yaw-offset과 조합)
-N_PER_YAW = 10                        # yaw 하나당 무작위 바람 조건 수 (총 N_YAW*N_PER_YAW)
-YAW_OFFSET_DEG = 0.0                  # 그리드 전체를 이만큼 밀어서 시작 (세션마다 다르게
-                                       # 주면, 세션들을 합쳤을 때 그리드가 더 촘촘해짐 -
-                                       # run_yaw_collection_sessions.sh가 자동으로 계산해서 줌)
-WIND_SPEED_RANGE_MPS = (0.0, 10.0)   # 균등분포 샘플링 범위
-RANDOM_SEED = 42                      # 재현 가능하게 고정
+TARGET_YAW_DEG = 0.0     # 학습 데이터 yaw(75~93도)와 확실히 다른 방향
+N_CONDITIONS = 8
+WIND_SPEED_RANGE_MPS = (0.0, 10.0)
+RANDOM_SEED = 999          # 학습 데이터 시드(42/123 등)와 안 겹치게
 TRIAL_DURATION_S = 8.0
 WIND_SETTLE_S = 1.0
 TRIAL_SETTLE_S = 1.0
@@ -50,7 +44,7 @@ SAFE_ALTITUDE_M = 1.5
 TAKEOFF_TIMEOUT_S = 15.0
 YAW_SETTLE_TIMEOUT_S = 10.0
 YAW_TOLERANCE_DEG = 3.0
-LOG_INTERVAL_S = 0.05   # 20Hz 로깅 (송신 주기와 맞춤 - 윈도우 기반 모델 학습용)
+LOG_INTERVAL_S = 0.05
 SEND_RATE_HZ = 20.0
 SEND_PERIOD_S = 1.0 / SEND_RATE_HZ
 
@@ -98,8 +92,6 @@ async def run():
             print("-> 전역 위치 및 홈 위치 준비 완료")
             break
 
-    print(f"\n[확인] PX4 SITL이 '{WORLD_NAME}' 월드로 실행 중인지 확인할 것.")
-
     print("\n--- Arming ---")
     await drone.action.arm()
     print("-> Armed")
@@ -123,7 +115,6 @@ async def run():
         await drone.action.land()
         return
 
-    # --- 모니터링 백그라운드 태스크 ---
     latest_pv = {"north": None, "east": None, "down": None,
                  "vn": None, "ve": None, "vd": None}
 
@@ -152,7 +143,6 @@ async def run():
     while latest_att["roll"] is None:
         await asyncio.sleep(0.05)
 
-    # --- Offboard 송신 전담 태스크 (검증된 패턴) ---
     current_cmd = {"north": 0.0, "east": 0.0, "down": 0.0, "yaw": 0.0}
     send_gaps = []
 
@@ -199,9 +189,19 @@ async def run():
 
     sender_task = asyncio.create_task(offboard_sender())
 
-    # --- CSV 파일 준비 ---
+    print(f"\n--- 목표 yaw {TARGET_YAW_DEG:.0f}도로 회전 중 (현재 {latest_att['yaw']:.1f}도) ---")
+    current_cmd["yaw"] = TARGET_YAW_DEG
+    t_yaw_start = time.monotonic()
+    while yaw_diff_deg(latest_att["yaw"], TARGET_YAW_DEG) > YAW_TOLERANCE_DEG:
+        if time.monotonic() - t_yaw_start > YAW_SETTLE_TIMEOUT_S:
+            print(f"  [경고] {YAW_SETTLE_TIMEOUT_S:.0f}초 내에 목표 yaw 미도달 "
+                  f"(현재 {latest_att['yaw']:.1f}도) - 그냥 진행")
+            break
+        await asyncio.sleep(0.1)
+    print(f"  -> yaw {latest_att['yaw']:.1f}도로 안정화")
+
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = f"../logs/wind_random_{timestamp_str}.csv"
+    csv_path = f"../logs/wind_yawtest_{TARGET_YAW_DEG:.0f}deg_{timestamp_str}.csv"
     csv_file = open(csv_path, "w", newline="")
     writer = csv.writer(csv_file)
     writer.writerow([
@@ -213,69 +213,43 @@ async def run():
     ])
     print(f"\nCSV 로그 저장 경로: {csv_path}")
 
-    yaw_values = [(i * (360.0 / N_YAW) + YAW_OFFSET_DEG) % 360.0 for i in range(N_YAW)]
+    wind_conditions = sample_wind_conditions(N_CONDITIONS, RANDOM_SEED)
+    print(f"\n총 {N_CONDITIONS}개 무작위 바람 조건 수집 시작 (yaw={TARGET_YAW_DEG:.0f}도 고정, "
+          f"조건당 {TRIAL_DURATION_S:.0f}초)")
+
     n_steps = int(TRIAL_DURATION_S / LOG_INTERVAL_S)
-    total_conditions = N_YAW * N_PER_YAW
-    print(f"\nyaw {N_YAW}방향(offset={YAW_OFFSET_DEG:.1f}도) x 방향당 바람조건 {N_PER_YAW}개 "
-          f"= 총 {total_conditions}개 수집 시작 "
-          f"(조건당 {TRIAL_DURATION_S:.0f}초, 예상 총 소요 "
-          f"{total_conditions*(TRIAL_DURATION_S+WIND_SETTLE_S+TRIAL_SETTLE_S)/60:.1f}분 "
-          f"+ yaw 회전 시간)")
 
-    cond_idx = 0
-    for yaw_idx, target_yaw in enumerate(yaw_values):
-        print(f"\n{'='*60}\n=== yaw {yaw_idx+1}/{N_YAW}: 목표 {target_yaw:.0f}도로 회전 중 "
-              f"(현재 {latest_att['yaw']:.1f}도) ===\n{'='*60}")
-        current_cmd["yaw"] = target_yaw
-        t_yaw_start = time.monotonic()
-        while yaw_diff_deg(latest_att["yaw"], target_yaw) > YAW_TOLERANCE_DEG:
-            if time.monotonic() - t_yaw_start > YAW_SETTLE_TIMEOUT_S:
-                print(f"  [경고] {YAW_SETTLE_TIMEOUT_S:.0f}초 내에 목표 yaw 미도달 "
-                      f"(현재 {latest_att['yaw']:.1f}도) - 그냥 진행")
-                break
-            await asyncio.sleep(0.1)
-        print(f"  -> yaw {latest_att['yaw']:.1f}도로 안정화")
+    for cond_idx, (wind_vx, wind_vy) in enumerate(wind_conditions):
+        speed = math.hypot(wind_vx, wind_vy)
+        await set_wind(wind_vx, wind_vy)
+        await asyncio.sleep(WIND_SETTLE_S)
 
-        # yaw별로 독립적이되 재현 가능하게 시드 오프셋
-        wind_conditions = sample_wind_conditions(N_PER_YAW, RANDOM_SEED + yaw_idx)
+        next_log = time.monotonic()
+        for i in range(n_steps):
+            t = i * LOG_INTERVAL_S
+            north, east, down = latest_pv["north"], latest_pv["east"], latest_pv["down"]
+            vn, ve, vd = latest_pv["vn"], latest_pv["ve"], latest_pv["vd"]
+            roll, pitch, yaw = latest_att["roll"], latest_att["pitch"], latest_att["yaw"]
 
-        for wind_vx, wind_vy in wind_conditions:
-            speed = math.hypot(wind_vx, wind_vy)
-            await set_wind(wind_vx, wind_vy)
-            await asyncio.sleep(WIND_SETTLE_S)
+            writer.writerow([
+                cond_idx, f"{wind_vx:.3f}", f"{wind_vy:.3f}", f"{t:.2f}",
+                f"{current_cmd['north']:.3f}", f"{current_cmd['east']:.3f}",
+                f"{north:.3f}", f"{east:.3f}", f"{down:.3f}",
+                f"{vn:.3f}", f"{ve:.3f}", f"{vd:.3f}",
+                f"{roll:.2f}", f"{pitch:.2f}", f"{yaw:.2f}",
+            ])
 
-            next_log = time.monotonic()
-            for i in range(n_steps):
-                t = i * LOG_INTERVAL_S
-                north, east, down = latest_pv["north"], latest_pv["east"], latest_pv["down"]
-                vn, ve, vd = latest_pv["vn"], latest_pv["ve"], latest_pv["vd"]
-                roll, pitch, yaw = latest_att["roll"], latest_att["pitch"], latest_att["yaw"]
+            next_log += LOG_INTERVAL_S
+            sleep_time = next_log - time.monotonic()
+            if sleep_time > 0:
+                await asyncio.sleep(sleep_time)
+            else:
+                next_log = time.monotonic()
 
-                writer.writerow([
-                    cond_idx, f"{wind_vx:.3f}", f"{wind_vy:.3f}", f"{t:.2f}",
-                    f"{current_cmd['north']:.3f}", f"{current_cmd['east']:.3f}",
-                    f"{north:.3f}", f"{east:.3f}", f"{down:.3f}",
-                    f"{vn:.3f}", f"{ve:.3f}", f"{vd:.3f}",
-                    f"{roll:.2f}", f"{pitch:.2f}", f"{yaw:.2f}",
-                ])
+        print(f"  [{cond_idx+1}/{N_CONDITIONS}] wind=({wind_vx:5.2f},{wind_vy:5.2f}) "
+              f"speed={speed:4.1f}m/s  roll={roll:5.1f} pitch={pitch:5.1f} yaw={yaw:5.1f}")
 
-                next_log += LOG_INTERVAL_S
-                sleep_time = next_log - time.monotonic()
-                if sleep_time > 0:
-                    await asyncio.sleep(sleep_time)
-                else:
-                    next_log = time.monotonic()
-
-            print(f"  [{cond_idx+1}/{total_conditions}] yaw={yaw:5.1f} "
-                  f"wind=({wind_vx:5.2f},{wind_vy:5.2f}) speed={speed:4.1f}m/s  "
-                  f"roll={roll:5.1f} pitch={pitch:5.1f}")
-
-            # 밤새 무인으로 돌 수 있으므로, 중간에 죽어도 여기까지는 안전하게 남도록
-            # 조건마다 디스크에 flush (원래는 맨 끝에만 close()해서 다 날아갈 위험 있었음)
-            csv_file.flush()
-
-            cond_idx += 1
-            await asyncio.sleep(TRIAL_SETTLE_S)
+        await asyncio.sleep(TRIAL_SETTLE_S)
 
     csv_file.close()
     print(f"\n데이터 수집 완료. CSV 저장됨: {csv_path}")
@@ -288,7 +262,7 @@ async def run():
             f"최대={max(send_gaps)*1000:.1f}ms  임계치 초과={n_over}/{len(send_gaps)}"
         )
 
-    await set_wind(5.0, 2.0)  # 기본값 복원
+    await set_wind(5.0, 2.0)
 
     for task in (sender_task, pv_task, att_task):
         task.cancel()
@@ -312,27 +286,20 @@ async def run():
             print("-> 착륙 완료 및 디스암 확인")
             break
 
-    print("\n무작위 바람 데이터 수집 완료.")
+    print(f"\nyaw 일반화 검증 데이터 수집 완료. yaw={TARGET_YAW_DEG:.0f}도")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n-yaw", type=int, default=N_YAW, help="yaw 그리드 개수 (0~360도를 등분)")
-    parser.add_argument("--n-per-yaw", type=int, default=N_PER_YAW, help="yaw 하나당 무작위 바람 조건 수")
-    parser.add_argument("--yaw-offset", type=float, default=YAW_OFFSET_DEG,
-                         help="yaw 그리드 시작점을 이만큼 밀기 - 여러 세션을 다른 offset으로 "
-                              "돌리면 합쳤을 때 더 촘촘한 그리드가 됨")
+    parser.add_argument("--yaw", type=float, default=TARGET_YAW_DEG)
+    parser.add_argument("--n", type=int, default=N_CONDITIONS)
     parser.add_argument("--speed-min", type=float, default=WIND_SPEED_RANGE_MPS[0])
     parser.add_argument("--speed-max", type=float, default=WIND_SPEED_RANGE_MPS[1])
     parser.add_argument("--seed", type=int, default=RANDOM_SEED)
-    parser.add_argument("--trial-duration", type=float, default=TRIAL_DURATION_S,
-                         help="조건 하나당 관측 시간(초)")
     args = parser.parse_args()
-    N_YAW = args.n_yaw
-    N_PER_YAW = args.n_per_yaw
-    YAW_OFFSET_DEG = args.yaw_offset
+    TARGET_YAW_DEG = args.yaw
+    N_CONDITIONS = args.n
     WIND_SPEED_RANGE_MPS = (args.speed_min, args.speed_max)
     RANDOM_SEED = args.seed
-    TRIAL_DURATION_S = args.trial_duration
 
     asyncio.run(run())

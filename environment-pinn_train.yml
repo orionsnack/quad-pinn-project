@@ -1,0 +1,14 @@
+# PINN 오프라인 학습 전용 환경 (offline_training/에서 사용)
+# 생성: conda env create -f environment-pinn_train.yml
+# 갱신: conda env update -f environment-pinn_train.yml --prune
+name: pinn_train
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cpu
+      - torch==2.13.0+cpu
+      - numpy==2.2.6
+      - pandas==2.3.3

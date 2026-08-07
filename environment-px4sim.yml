@@ -1,0 +1,51 @@
+# 시뮬레이션 + 실시간 PINN 추론용 환경 (sim_scripts/에서 사용)
+# 생성: conda env create -f environment-px4sim.yml
+# 갱신: conda env update -f environment-px4sim.yml --prune
+#
+# PX4-Autopilot 빌드 요구 패키지(kconfiglib 등)도 여기 같이 넣어둠: 이 환경의
+# python이 PATH상 CMake가 찾는 Python3로 잡히는 경우가 있어서(원인 불명확), 빌드
+# 도중 CMake가 이 python으로 kconfig를 구성하려다 kconfiglib 없어서 실패한 적 있음
+# (setup_guide.md 트러블슈팅 참고). PX4-Autopilot/Tools/setup/requirements.txt 전체를
+# 그대로 포함시켜서 재발 방지.
+name: px4sim
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cpu
+      - mavsdk==3.17.2
+      - torch==2.13.0+cpu
+      - numpy==2.2.6
+      - pandas==2.3.3
+      # --- 아래부터는 PX4-Autopilot/Tools/setup/requirements.txt 내용 ---
+      - argcomplete
+      - cerberus
+      - coverage
+      - empy>=3.3,<4
+      - future
+      - jinja2>=2.8
+      - jsonschema
+      - kconfiglib
+      - lark
+      - lxml
+      - matplotlib>=3.0
+      - nunavut>=1.1.0
+      - packaging
+      - pkgconfig
+      - psutil
+      - pycryptodome
+      - pygments
+      - pymavlink
+      - pynacl
+      - pyros-genmsg
+      - pyserial
+      - pyulog>=0.5.0
+      - pyyaml
+      - requests
+      - setuptools>=39.2.0,<=81.0.0
+      - six>=1.12.0
+      - sympy>=1.10.1
+      - toml>=0.9
+      - wheel>=0.31.1

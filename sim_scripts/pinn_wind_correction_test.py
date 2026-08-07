@@ -37,7 +37,7 @@ from mavsdk import System
 from mavsdk.offboard import (OffboardError, PositionNedYaw, VelocityNedYaw, AccelerationNed)
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "offline_training"))
-from train_wind_estimator import WindPINN, WINDOW, FEATURES  # noqa: E402
+from train_wind_estimator import WindPINN, WINDOW, FEATURES, yaw_decompose  # noqa: E402
 
 
 # ============================================================
@@ -283,13 +283,15 @@ async def run():
             t = i * LOG_INTERVAL_S
             north, east = latest_pv["north"], latest_pv["east"]
             vn, ve = latest_pv["vn"], latest_pv["ve"]
-            roll, pitch = latest_att["roll"], latest_att["pitch"]
+            roll, pitch, yaw = latest_att["roll"], latest_att["pitch"], latest_att["yaw"]
 
             # pos_err(위치오차)는 feature에 안 씀 - 이전 버전에서 폐루프 폭주의
             # 원인이었음 (train_wind_estimator.py 주석 참고). 이번엔 position
             # setpoint 자체가 안 움직이므로 위험은 줄었지만, 동일 모델을 그대로
             # 재사용하기 위해 feature 구성도 학습 때와 동일하게 유지.
-            feat = {"vn_m_s": vn, "ve_m_s": ve, "roll_deg": roll, "pitch_deg": pitch}
+            r_cos, r_sin, p_cos, p_sin = yaw_decompose(roll, pitch, yaw)
+            feat = {"vn_m_s": vn, "ve_m_s": ve, "roll_cos_yaw": r_cos, "roll_sin_yaw": r_sin,
+                    "pitch_cos_yaw": p_cos, "pitch_sin_yaw": p_sin}
             corrector.push_state([feat[f] for f in FEATURES])
 
             wind_n, wind_e = 0.0, 0.0

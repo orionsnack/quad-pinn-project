@@ -19,6 +19,28 @@ PINN 기반 바람(외란) 벡터 추정 모델 학습.
 잔차를 계산할 때 반드시 축 변환(wind_north = wind_vy_enu, wind_east = wind_vx_enu)을
 거친 뒤 비교해야 함. data_loss는 라벨이 CSV의 원본(ENU) 표기와 동일하므로 변환 불필요.
 
+주의(중요) 2 - yaw 종속성: feature로 쓰는 roll/pitch는 기체(body) 좌표계라, 같은
+바람이라도 기수 방향(yaw)에 따라 값이 달라짐(북풍을 맞을 때 기수가 북쪽이면 주로
+pitch로, 동쪽이면 주로 roll로 나타남). vn/ve는 이미 관성(NED) 좌표계라 문제없지만
+roll/pitch는 그대로 쓰면 "학습 당시의 yaw에서만 통하는" 모델이 됨.
+
+1차 시도(실패, 이건 확실함): roll/pitch가 yaw에 대해 대칭으로(같은 비중으로) 회전한다고
+가정하고 손으로 회전 공식을 유도해서 tilt_north/tilt_east 2개로 축약했었음. 그런데
+yaw=0도로 따로 모은 검증 데이터로 확인해보니 val_MAE가 정상 대비 3~4배로 나쁘게
+나옴 (wind_yaw_generalization_test.py로 검증, evaluate_checkpoint.py로 확인) - 이
+실패 자체는 직접 측정한 확실한 결과.
+왜 실패했는지는 불확실함: yaw=92도/0도 데이터를 합쳐 회귀분석해보면 roll/pitch 게인이
+비대칭인 것처럼 보이는 패턴이 나오긴 하는데, yaw 표본이 딱 2종류뿐이라 이 회귀 자체의
+신뢰도가 낮음 - 다른 원인이었을 가능성도 있어서 "왜"는 확정하지 않음.
+
+2차 시도(현재): 정확한 결합 공식을 손으로 다시 유도하는 대신, `roll_deg*cos(yaw)`,
+`roll_deg*sin(yaw)`, `pitch_deg*cos(yaw)`, `pitch_deg*sin(yaw)` 4개 항을 그대로
+feature로 주고("물리적으로 그럴듯한 후보 기저"만 제공), roll/pitch 축의 게인이 비대칭
+이어도 상관없이(원인이 뭐였든) 정확한 결합 방식은 신경망의 hidden layer가 (yaw가
+다양한) 데이터로부터 직접 배우게 함 (`yaw_decompose()`). 이러려면 학습 데이터의
+yaw 자체가 다양해야 하므로, `wind_random_sweep.py`가 조건마다 yaw도 같이 그리드로
+바꾸도록 확장함.
+
 평가 방법(중요): 조건 수가 적을 때(지금 최대 백여 개) 한 번의 무작위 80/20 분할만으로
 "좋아졌다/나빠졌다"를 판단하면, 그 분할에 어떤 조건이 뽑혔는지에 따라 결과가 크게
 흔들림 (실제로 재학습마다 val_MAE가 들쭉날쭉했음). --kfold N을 주면 조건을 N등분해서
@@ -49,7 +71,19 @@ WINDOW = 20          # 최근 몇 스텝(0.05s 간격이면 1.0초)을 입력으
 # 으로 나가면서 폭주함 (pinn_wind_correction_test.py 1차 실험에서 실제로 발산 확인됨).
 # vn/ve/roll/pitch는 보정에 의해 setpoint가 바로 바뀌어도 pos_err만큼 직접적/즉각적으로
 # 오염되지 않아 상대적으로 안전함.
-FEATURES = ["vn_m_s", "ve_m_s", "roll_deg", "pitch_deg"]
+# roll_deg/pitch_deg 원본 대신 yaw와의 곱항 4개를 씀 - 위 "주의 2" 참고.
+# (roll*cos, roll*sin, pitch*cos, pitch*sin) - 정확한 결합 계수는 신경망이 배움.
+FEATURES = ["vn_m_s", "ve_m_s", "roll_cos_yaw", "roll_sin_yaw", "pitch_cos_yaw", "pitch_sin_yaw"]
+
+
+def yaw_decompose(roll_deg, pitch_deg, yaw_deg):
+    """roll/pitch를 yaw의 sin/cos와 각각 곱해 4개 항으로 분해.
+    "주의 2"에서 실패한 손유도 회전(대칭 가정)과 달리, 이 4개 항은 대칭을 가정하지
+    않는 가장 일반적인 1차 후보 기저임 - roll/pitch 축의 게인이 서로 달라도 신경망의
+    선형 입력층이 각 항에 다른 가중치를 줄 수 있어 흡수 가능. 스칼라/numpy 배열 지원."""
+    yaw_rad = np.radians(yaw_deg)
+    cos_y, sin_y = np.cos(yaw_rad), np.sin(yaw_rad)
+    return roll_deg * cos_y, roll_deg * sin_y, pitch_deg * cos_y, pitch_deg * sin_y
 HIDDEN = 64           # 128로 키웠다가 극심한 과적합(train_loss~0, val 전혀 개선 안 됨)
                        # 확인하고 64로 되돌림 - 지금 데이터양엔 이게 맞음
 LAMBDA_PHYSICS = 0.05
@@ -93,6 +127,10 @@ def build_windows(df: pd.DataFrame):
         ve = g["ve_m_s"].to_numpy()
         an = np.gradient(vn, t)  # 유한차분 가속도 (m/s^2)
         ae = np.gradient(ve, t)
+
+        (g["roll_cos_yaw"], g["roll_sin_yaw"],
+         g["pitch_cos_yaw"], g["pitch_sin_yaw"]) = yaw_decompose(
+            g["roll_deg"].to_numpy(), g["pitch_deg"].to_numpy(), g["yaw_deg"].to_numpy())
 
         feats = g[FEATURES].to_numpy()
         # 행마다 라벨을 따로 씀 (iloc[0] 고정값이 아님) - wind_random_sweep.py처럼
