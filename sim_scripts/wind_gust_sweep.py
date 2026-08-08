@@ -207,7 +207,9 @@ async def run():
 
     # --- CSV 파일 준비 ---
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = f"../logs/wind_gust_{timestamp_str}.csv"
+    speed_str = f"{BASE_SPEED_RANGE_MPS[0]:g}-{BASE_SPEED_RANGE_MPS[1]:g}"
+    csv_path = (f"../logs/wind_gust_{timestamp_str}"
+                f"_n{N_EPISODES}_speed{speed_str}_seed{RANDOM_SEED}.csv")
     csv_file = open(csv_path, "w", newline="")
     writer = csv.writer(csv_file)
     writer.writerow([

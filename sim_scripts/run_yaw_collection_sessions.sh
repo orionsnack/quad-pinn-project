@@ -34,12 +34,15 @@ set -uo pipefail
 
 PX4_DIR="$HOME/MyProjects/PX4-Autopilot"
 PROJECT_DIR="$HOME/MyProjects/quad-pinn-project"
+PX4SIM_PYTHON="$HOME/miniconda3/envs/px4sim/bin/python"
 SESSIONS=4
 N_YAW=24
 N_PER_YAW=10
 TRIAL_DURATION=8
 SEED_BASE=42
-BOOT_WAIT_S=10
+BOOT_WAIT_S=15
+START_SESSION=1
+MAX_RETRIES=3
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -48,6 +51,7 @@ while [[ $# -gt 0 ]]; do
         --n-per-yaw) N_PER_YAW="$2"; shift 2 ;;
         --trial-duration) TRIAL_DURATION="$2"; shift 2 ;;
         --seed-base) SEED_BASE="$2"; shift 2 ;;
+        --start-session) START_SESSION="$2"; shift 2 ;;
         *) echo "알 수 없는 옵션: $1"; exit 1 ;;
     esac
 done
@@ -58,16 +62,37 @@ COMBINED_YAW_STEP=$(awk -v n="$COMBINED_YAW_POINTS" 'BEGIN{printf "%.2f", 360.0/
 # 대략적인 총 소요시간 추정치 (조건시간 + yaw회전 + SITL재시작/이착륙 오버헤드 세션당 ~2분 가정)
 EST_HOURS=$(awk -v ny="$N_YAW" -v npy="$N_PER_YAW" -v td="$TRIAL_DURATION" -v s="$SESSIONS" \
     'BEGIN{cond_s=ny*npy*(td+2); rot_s=ny*4; overhead_s=120; total=(cond_s+rot_s+overhead_s)*s; printf "%.1f", total/3600}')
+# 세션 하나가 이 시간(초)을 넘기면 뭔가 멈춘 것으로 보고 강제 종료 후 재시도함
+# (기대 소요시간의 1.3배 - asyncio 내부 타임아웃이 안 먹는 경우에 대비한 OS 레벨 안전장치)
+SESSION_TIMEOUT_S=$(awk -v ny="$N_YAW" -v npy="$N_PER_YAW" -v td="$TRIAL_DURATION" \
+    'BEGIN{cond_s=ny*npy*(td+2); rot_s=ny*4; overhead_s=120; printf "%d", (cond_s+rot_s+overhead_s)*1.3}')
 echo "=== 세션 ${SESSIONS}개, 세션당 yaw ${N_YAW} x 방향당 ${N_PER_YAW} = ${TOTAL_PER_SESSION}조건 (조건당 관측 ${TRIAL_DURATION}초) ==="
 echo "=== 총 예상 조건 수: $((TOTAL_PER_SESSION * SESSIONS)) ==="
 echo "=== 세션들을 합친 yaw 해상도: ${COMBINED_YAW_POINTS}지점 (${COMBINED_YAW_STEP}도 간격) ==="
 echo "=== 예상 총 소요시간: 약 ${EST_HOURS}시간 (대략적인 추정치) ==="
+echo "=== 세션당 강제종료 타임아웃: ${SESSION_TIMEOUT_S}초 ==="
 
 restart_sitl() {
-    echo "  [SITL] 기존 프로세스 정리 중..."
+    echo "  [SITL] 기존 프로세스 정리 중 (정상종료 시도)..."
+    pkill -TERM -f "px4_sitl_default/bin/px4" 2>/dev/null
+    pkill -TERM -f "gz sim" 2>/dev/null
+    pkill -TERM -f "make px4_sitl" 2>/dev/null
+    pkill -TERM -f "mavsdk_server" 2>/dev/null
+    pkill -TERM -f "wind_random_sweep.py" 2>/dev/null
+
+    local term_waited=0
+    while pgrep -f "px4_sitl_default/bin/px4|gz sim|mavsdk_server|wind_random_sweep.py" > /dev/null \
+          && [[ $term_waited -lt 8 ]]; do
+        sleep 1
+        term_waited=$((term_waited + 1))
+    done
+
+    echo "  [SITL] 강제 정리 (남아있는 프로세스 있으면)..."
     pkill -9 -f "px4_sitl_default/bin/px4" 2>/dev/null
     pkill -9 -f "gz sim" 2>/dev/null
     pkill -9 -f "make px4_sitl" 2>/dev/null
+    pkill -9 -f "mavsdk_server" 2>/dev/null
+    pkill -9 -f "wind_random_sweep.py" 2>/dev/null
     sleep 3
 
     echo "  [SITL] 재시작 중..."
@@ -87,28 +112,37 @@ restart_sitl() {
 }
 
 FAILED_SESSIONS=0
-for i in $(seq 1 "$SESSIONS"); do
+for i in $(seq "$START_SESSION" "$SESSIONS"); do
     echo ""
     echo "############################################################"
     echo "# 세션 ${i}/${SESSIONS}"
     echo "############################################################"
-
-    restart_sitl
 
     session_seed=$((SEED_BASE + i * 1000))
     # 세션마다 그리드를 (360/N_YAW/SESSIONS)*세션순번만큼 밀어서, 세션들을 합쳤을 때
     # 촘촘한 그리드가 되도록 함 (파일 상단 주석 참고)
     yaw_offset=$(awk -v n="$N_YAW" -v s="$SESSIONS" -v idx="$((i - 1))" \
         'BEGIN{printf "%.3f", 360.0/n/s*idx}')
-    echo "  [수집] 시작 (seed=${session_seed}, yaw-offset=${yaw_offset}도)"
-    if (cd "$PROJECT_DIR/sim_scripts" && \
-        conda run -n px4sim python wind_random_sweep.py \
-            --n-yaw "$N_YAW" --n-per-yaw "$N_PER_YAW" \
-            --trial-duration "$TRIAL_DURATION" \
-            --yaw-offset "$yaw_offset" --seed "$session_seed"); then
-        echo "  [수집] 세션 ${i} 완료"
-    else
-        echo "  [수집] 세션 ${i} 실패 (exit code $?) - 다음 세션으로 계속 진행"
+
+    session_ok=0
+    for attempt in $(seq 1 "$MAX_RETRIES"); do
+        restart_sitl
+        echo "  [수집] 시작 (seed=${session_seed}, yaw-offset=${yaw_offset}도, 시도 ${attempt}/${MAX_RETRIES}, 타임아웃 ${SESSION_TIMEOUT_S}초)"
+        if (cd "$PROJECT_DIR/sim_scripts" && \
+            timeout -k 15 "${SESSION_TIMEOUT_S}s" \
+            "$PX4SIM_PYTHON" -u wind_random_sweep.py \
+                --n-yaw "$N_YAW" --n-per-yaw "$N_PER_YAW" \
+                --trial-duration "$TRIAL_DURATION" \
+                --yaw-offset "$yaw_offset" --seed "$session_seed"); then
+            echo "  [수집] 세션 ${i} 완료 (시도 ${attempt}/${MAX_RETRIES})"
+            session_ok=1
+            break
+        else
+            echo "  [수집] 세션 ${i} 시도 ${attempt}/${MAX_RETRIES} 실패 (exit code $?)"
+        fi
+    done
+    if [[ "$session_ok" -ne 1 ]]; then
+        echo "  [수집] 세션 ${i} 최종 실패 (${MAX_RETRIES}회 모두 실패) - 다음 세션으로 계속 진행"
         FAILED_SESSIONS=$((FAILED_SESSIONS + 1))
     fi
 done

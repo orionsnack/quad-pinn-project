@@ -26,8 +26,11 @@ import asyncio
 import csv
 import datetime
 import math
+import os
 import random
+import sys
 import time
+import traceback
 from mavsdk import System
 from mavsdk.offboard import (OffboardError, PositionNedYaw)
 
@@ -47,8 +50,10 @@ TRIAL_DURATION_S = 8.0
 WIND_SETTLE_S = 1.0
 TRIAL_SETTLE_S = 1.0
 SAFE_ALTITUDE_M = 1.5
-TAKEOFF_TIMEOUT_S = 15.0
 YAW_SETTLE_TIMEOUT_S = 10.0
+# 연결~offboard 시작(_preflight) 전체에 걸리는 시간 상한. SITL 재시작 직후 GPS/텔레메트리
+# 스트림이 안 올라오면 이 안의 어느 단계에서든 무한정 멈출 수 있어서 하나로 묶어 방지함.
+PREFLIGHT_TIMEOUT_S = 90.0
 YAW_TOLERANCE_DEG = 3.0
 LOG_INTERVAL_S = 0.05   # 20Hz 로깅 (송신 주기와 맞춤 - 윈도우 기반 모델 학습용)
 SEND_RATE_HZ = 20.0
@@ -81,9 +86,12 @@ def yaw_diff_deg(a, b):
     return abs(d)
 
 
-async def run():
-    drone = System()
-
+async def _preflight(drone):
+    """연결부터 offboard 진입까지. SITL 재시작 직후 GPS/텔레메트리 스트림이 안 올라오면
+    이 단계 어딘가(연결/health/arm/takeoff/텔레메트리 첫 값 대기/offboard 시작)에서
+    영원히 멈출 수 있어서, run()에서 이 함수 전체를 asyncio.wait_for로 감싸 하나의
+    타임아웃으로 관리함 (단계별로 따로 타임아웃을 붙이면 새 단계가 생길 때마다 또
+    빼먹기 쉬움)."""
     print("PX4 SITL에 연결 시도 중...")
     await drone.connect(system_address="udpin://0.0.0.0:14540")
 
@@ -108,20 +116,11 @@ async def run():
     await drone.action.takeoff()
 
     print(f"  안전 고도({SAFE_ALTITUDE_M}m) 도달 대기 중...")
-    t_start = time.monotonic()
-    reached_altitude = False
     async for position in drone.telemetry.position():
         alt = position.relative_altitude_m
         if alt >= SAFE_ALTITUDE_M:
             print(f"  -> 안전 고도 도달 (relative_altitude={alt:.2f}m)")
-            reached_altitude = True
             break
-        if time.monotonic() - t_start > TAKEOFF_TIMEOUT_S:
-            print(f"  [경고] {TAKEOFF_TIMEOUT_S:.0f}초 내에 안전 고도 미도달.")
-            break
-    if not reached_altitude:
-        await drone.action.land()
-        return
 
     # --- 모니터링 백그라운드 태스크 ---
     latest_pv = {"north": None, "east": None, "down": None,
@@ -190,18 +189,33 @@ async def run():
     )
 
     print("\n--- Offboard 모드 시작 ---")
+    await drone.offboard.start()
+
+    sender_task = asyncio.create_task(offboard_sender())
+    return latest_pv, latest_att, current_cmd, send_gaps, pv_task, att_task, sender_task
+
+
+async def run():
+    drone = System()
+
     try:
-        await drone.offboard.start()
+        (latest_pv, latest_att, current_cmd, send_gaps,
+         pv_task, att_task, sender_task) = await asyncio.wait_for(
+            _preflight(drone), timeout=PREFLIGHT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        raise RuntimeError(
+            f"이륙 준비(연결~offboard 시작)가 {PREFLIGHT_TIMEOUT_S:.0f}초를 넘음 "
+            "(SITL 재시작 문제 가능성)")
     except OffboardError as error:
         print(f"Offboard 시작 실패: {error._result.result}")
         await drone.action.land()
         return
 
-    sender_task = asyncio.create_task(offboard_sender())
-
     # --- CSV 파일 준비 ---
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = f"../logs/wind_random_{timestamp_str}.csv"
+    yaw_offset_str = f"{YAW_OFFSET_DEG:.1f}".replace(".", "p")
+    csv_path = (f"../logs/wind_random_{timestamp_str}"
+                f"_yaw{yaw_offset_str}_n{N_YAW}x{N_PER_YAW}_seed{RANDOM_SEED}.csv")
     csv_file = open(csv_path, "w", newline="")
     writer = csv.writer(csv_file)
     writer.writerow([
@@ -335,4 +349,17 @@ if __name__ == "__main__":
     RANDOM_SEED = args.seed
     TRIAL_DURATION_S = args.trial_duration
 
-    asyncio.run(run())
+    # mavsdk_server(자식 프로세스)/grpc.aio 쪽 정리가 asyncio.run() 종료 시 멈추는 경우가
+    # 있어서(트레이스백은 찍히는데 프로세스는 안 죽음), 일반 종료 대신 os._exit()로
+    # 인터프리터/스레드 정리 과정을 건너뛰고 바로 죽임 - 오케스트레이션 스크립트의
+    # 재시도가 실제로 넘어가려면 이 프로세스가 반드시 빨리 죽어야 함.
+    try:
+        asyncio.run(run())
+    except BaseException:
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

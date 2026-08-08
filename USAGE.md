@@ -75,7 +75,7 @@ python wind_yaw_generalization_test.py --yaw 180 --n 10   # yaw=180도에서 10�
 
 ```bash
 # 단일/여러 CSV로 배포용 모델 학습 (항상 마지막에 80/20 분할로 저장됨)
-python train_wind_estimator.py ../logs/wind_random_20260808_005015.csv
+python train_wind_estimator.py ../logs/wind_random_20260808_005015_n35_speed4-11_seed77.csv
 python train_wind_estimator.py ../logs/wind_random_*.csv ../logs/wind_gust_*.csv
 
 # k-fold 교차검증만 (모델 저장 안 함, 성능 안정성 확인용)
