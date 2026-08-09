@@ -16,8 +16,7 @@ PX4 SITL + Gazebo(Harmonic) + MAVSDK-Python 환경을 구축하고, Offboard 제
 만드는 과정에서 발견한 버그들을 해결했습니다.
 - **yaw rate 명령이 비결정적으로 동작하던 버그**: 이륙 후 목표 고도 도달을 확인 안 하고
   바로 Offboard로 넘어가서, 지면 근처에 낮게 고정된 채로 yaw 명령이 무시되던 문제였음.
-  `telemetry.position()`으로 실제 고도 도달을 확인한 후 Offboard 전환하도록 수정 (8-3절
-  반영됨).
+  `telemetry.position()`으로 실제 고도 도달을 확인한 후 Offboard 전환하도록 수정함.
 
 ### 2. 바람 외란 PID-only 베이스라인
 `gz_x500_windy` 월드에서 순수 PID 컨트롤러가 바람에 얼마나 잘 버티는지 측정. 강풍
@@ -102,67 +101,6 @@ logs/                  실험 결과 CSV
 
 모두 `sim_scripts/`에 저장. 실행 전 항상 WSL 다른 터미널에서 PX4 SITL(`pxh>`)이 돌고 있어야 함.
 
-### 8-1. `test_connection.py` — 연결/텔레메트리 확인
-
-MAVSDK로 SITL에 연결해서 위치·자세 텔레메트리를 몇 개 받아 출력하는 가장 기본적인 스크립트.
-포트는 `14540`(PX4가 컴패니언 컴퓨터용으로 여는 포트) 사용.
-
-```bash
-python test_connection.py
-```
-
-### 8-2. `arm_takeoff_land.py` — 고수준 명령 제어
-
-`drone.action` API로 Arm → Takeoff(3.0m) → Hover 5초 → Land까지 완전히 코드로 실행.
-QGC 없이도 콘솔 로그만으로 전체 비행 사이클 확인 가능.
-
-```bash
-python arm_takeoff_land.py
-```
-
-### 8-3. `offboard_velocity_test.py` — Offboard 저수준 속도 제어
-
-`drone.offboard` API로 velocity setpoint를 직접 스트리밍하는 실습.
-전진(velocity body frame), 회전(yaw rate) 명령 모두 안정적으로 작동 확인됨.
-
-핵심 패턴:
-- Offboard 진입 전 setpoint 최소 1회 선행 전송 필수
-- 진입 후 0.5초 이내 주기로 계속 스트리밍 필요 (안 하면 PX4가 자동으로 Offboard 종료)
-- yaw 텔레메트리는 필요할 때만 `anext()` 호출하지 말고, 백그라운드 태스크로 계속 소비하면서
-  최신값만 변수에 저장하는 방식 사용할 것 (스트림 적체 방지)
-- `action.takeoff()` 후 고정 시간 sleep으로 넘어가지 말고, `telemetry.position()`으로 실제
-  고도(`relative_altitude_m`)가 안전 고도(예: 1.5m 이상)에 도달했는지 확인 후 Offboard로 전환할 것
-  (목표 고도 미도달 상태에서 Offboard의 `vz=0`이 낮은 고도를 그대로 고정시켜버리는 문제 있었음)
-
-```bash
-python offboard_velocity_test.py
-```
-
-### 8-4. `yaw_rate_sweep_test.py` — yaw rate 이상 현상 진단용
-
-여러 yaw_rate(10/20/45/60/90 deg/s)를 한 비행 세션에서 순차 테스트하고 CSV로 기록.
-`flight_mode` 실시간 로깅 포함 (Offboard 이탈 여부 확인용).
-
-```bash
-python yaw_rate_sweep_test.py
-```
-
-실행 후 `yaw_sweep_YYYYMMDD_HHMMSS.csv` 파일 생성됨.
-
-### 8-5. `wind_disturbance_baseline.py` — 바람 외란 PID-only 베이스라인 (단일 조건)
-
-`gz_x500_windy` 월드(고정 바람, `linear_velocity=(5,2,0)` m/s)에서 PINN 보정 없이 순수
-PID로만 비행하며 얼마나 밀리는지 기록. 호버링(위치 고정, 30초) → 직선비행(vx=2m/s, 20초)
-두 phase.
-
-핵심 결과: 강풍에서도 위치오차는 PID가 알아서 5cm 이내로 잘 잡음. 대신 그 대가로
-roll/pitch가 바람 세기에 비례해서 계속 기울어진 채로 유지됨 (예: 8.5m/s에서
-roll≈3°, pitch≈5° 정도). 이 "자세 바이어스"가 외란의 흔적이자 나중에 PINN이 추정할 대상.
-
-```bash
-python wind_disturbance_baseline.py
-```
-
 ### 8-6. `wind_sweep_baseline.py` — 바람 조건 스윕 + 반복 (calm/light/default/strong/crosswind)
 
 한 번의 비행 세션 안에서 `gz topic -t /world/windy/wind -m gz.msgs.Wind -p '...'`로
@@ -246,31 +184,11 @@ SITL/포트를 두 프로세스가 나눠 쓰면서 서로 충돌**하니, 재�
 만듦. 세션 사이 `pkill -9`로 강제종료를 반복하는 구조라 이 파일의 자기장 캘리브레이션
 값이 가끔 깨지는 것으로 추정됨 (2026-08-08 밤 실제로 이걸로 세션 7이 계속 멈췄었음).
 
-### 8-8. `pinn_correction_interface_test.py` — 보정 배관(pipeline) 연결 테스트
-
-아직 실제 PINN 없이, "상태 읽기 → 보정값 계산(`compute_correction()`) → setpoint에
-더하기 → 실제 송신"이라는 배관이 끝까지 연결되어 있는지 검증하는 스크립트. 알려진
-테스트값(north+1.5m, east-1.0m)을 15초 뒤에 주입해서, 드론이 실제로 그만큼 이동하는지
-확인 (로그가 아니라 실제 비행 결과로 검증). 무풍/실제 강풍(8.5m/s) 양쪽에서 검증 완료.
-
-```bash
-python pinn_correction_interface_test.py
-```
-
-### 8-9. `pinn_wind_correction_test.py` — 학습된 PINN을 실제로 연결 (강풍 1개 조건 A/B)
-
-`offline_training/wind_estimator.pt`를 로드해서 실시간 추론 → 보정 → 송신까지 전부
-연결한 최종 버전. "보정 OFF(PID-only)" vs "보정 ON"을 같은 강풍(8m/s,3m/s) 온셋
-상황에서 비교. **가속도 피드포워드 방식**(자세한 설계 이유는 12절 참고)을 사용하며,
-결과: 바람 온셋 시 피크 위치오차가 0.469m → 0.212m로 약 55% 감소.
-
-```bash
-python pinn_wind_correction_test.py
-```
-
 ### 8-10. `pinn_wind_correction_sweep.py` — PINN 보정 다중 조건 A/B 스윕
 
-8-9의 다중 조건 버전. calm/light/default/strong/crosswind 5개 조건 각각에서 OFF→ON
+`pinn_wind_correction_test.py`(강풍 1개 조건 A/B, 가속도 피드포워드 방식 - 자세한
+설계 이유는 12절 참고)의 다중 조건 버전. calm/light/default/strong/crosswind 5개
+조건 각각에서 OFF→ON
 쌍을 반복해서, 55% 개선이 특정 조건에서만 우연히 나온 게 아닌지 확인. deadband
 (`WIND_DEADBAND_MPS`) 적용 후 **5개 조건 전부 개선**(+8.2%~+71.3%). 자세한 결과는
 12절 참고.

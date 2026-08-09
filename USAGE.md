@@ -17,17 +17,10 @@
 
 | 파일 | 용도 | 필요 SITL 월드 | 실행 명령 | 결과 저장 위치 |
 |---|---|---|---|---|
-| `test_connection.py` | MAVSDK로 SITL에 붙어서 위치/자세 텔레메트리 몇 개 받아보는 가장 기본적인 연결 확인 | `gz_x500` (또는 `_windy`) | `python test_connection.py` | 콘솔 출력만 |
-| `arm_takeoff_land.py` | `drone.action` 고수준 API로 Arm→Takeoff(3m)→Hover 5초→Land 전체 사이클을 코드로 실행 | `gz_x500` (또는 `_windy`) | `python arm_takeoff_land.py` | 콘솔 출력만 |
-| `offboard_velocity_test.py` | Offboard 모드로 velocity setpoint(전진/yaw rate)를 직접 스트리밍하는 저수준 제어 실습 | `gz_x500` (또는 `_windy`) | `python offboard_velocity_test.py` | 콘솔 출력만 |
-| `yaw_rate_sweep_test.py` | 여러 yaw_rate(10/20/45/60/90 deg/s)를 한 세션에서 순차 테스트하며 이상 동작(비결정적 회전) 진단 | `gz_x500` (또는 `_windy`) | `python yaw_rate_sweep_test.py` | `sim_scripts/yaw_sweep_TIMESTAMP.csv` |
-| `wind_disturbance_baseline.py` | 고정 바람(단일 조건)에서 PINN 보정 없이 순수 PID만으로 얼마나 밀리는지 기록하는 베이스라인 | `gz_x500_windy` 필수 | `python wind_disturbance_baseline.py` | `sim_scripts/wind_baseline_TIMESTAMP.csv` |
 | `wind_sweep_baseline.py` | calm/light/default/strong/crosswind 5개 바람 조건을 런타임에 바꿔가며 반복 측정하는 베이스라인 스윕 | `gz_x500_windy` 필수 | `python wind_sweep_baseline.py` | `sim_scripts/wind_sweep_TIMESTAMP.csv` |
 | `wind_random_sweep.py` | PINN 학습용 데이터 수집 — yaw 12방향(그리드) x 방향당 무작위 바람조건(기본 10개)으로 호버링하며 라벨링. yaw도 그리드로 도는 이유는 README 12-9절/12-10절 참고 (roll/pitch가 yaw에 종속적이라 다양한 yaw로 안 모으면 모델이 특정 방향에서만 통함) | `gz_x500_windy` 필수 | `python wind_random_sweep.py` (옵션 아래 참고) | `../logs/wind_random_TIMESTAMP.csv` |
 | `wind_gust_sweep.py` | PINN 학습용 데이터 수집 — 바람이 사인파로 계속 변하는 gust 조건(기본 15개 에피소드) 라벨링. yaw는 그리드로 안 돌고 스폰 방향 고정(아직 미개선) | `gz_x500_windy` 필수 | `python wind_gust_sweep.py` (옵션 아래 참고) | `../logs/wind_gust_TIMESTAMP.csv` |
 | `wind_yaw_generalization_test.py` | 학습 yaw 범위와 다른 방향(기본 0도)으로 회전해서 소규모(기본 8개) 검증 데이터만 모으는 스팟체크용 — `evaluate_checkpoint.py`와 세트로 사용 | `gz_x500_windy` 필수 | `python wind_yaw_generalization_test.py` (`--yaw`, `--n` 옵션) | `../logs/wind_yawtest_{yaw}deg_TIMESTAMP.csv` |
-| `pinn_correction_interface_test.py` | 실제 PINN 없이 "상태 읽기→보정값 계산→송신" 배관이 끝까지 연결되는지, 알려진 테스트값으로 검증 | `gz_x500_windy` 필수 | `python pinn_correction_interface_test.py` | `sim_scripts/pinn_interface_test_TIMESTAMP.csv` |
-| `pinn_wind_correction_test.py` | 학습된 `wind_estimator.pt`를 실시간 추론에 연결해서 보정 OFF vs ON을 강풍 1개 조건으로 A/B 비교 | `gz_x500_windy` 필수 (torch 필요) | `python pinn_wind_correction_test.py` | `../logs/pinn_correction_ab_TIMESTAMP.csv` |
 | `pinn_wind_correction_sweep.py` | 위 A/B 테스트를 5개 바람 조건(calm~crosswind) 전체로 반복해 보정 효과의 일관성을 확인 | `gz_x500_windy` 필수 (torch 필요) | `python pinn_wind_correction_sweep.py` | `../logs/pinn_correction_sweep_TIMESTAMP.csv` |
 | `pinn_wind_correction_gust_sweep.py` | 위 스윕의 gust 버전 — 바람 크기가 사인파로 계속 변하는 4개 조건에서 보정 OFF/ON A/B 비교 | `gz_x500_windy` 필수 (torch 필요) | `python pinn_wind_correction_gust_sweep.py` | `../logs/pinn_correction_gust_sweep_TIMESTAMP.csv` |
 | `pinn_correction_param_tuning.py` | `ACCEL_GAIN`/`WIND_DEADBAND_MPS` 값을 여러 개 스윕하며 대표 조건에서 개선율과 roll/pitch 안정성을 비교 (결론: README 12-8절 참고, 현재 값 유지) | `gz_x500_windy` 필수 (torch 필요) | `python pinn_correction_param_tuning.py` | `../logs/pinn_correction_param_tuning_TIMESTAMP.csv` |
@@ -75,15 +68,15 @@ python wind_yaw_generalization_test.py --yaw 180 --n 10   # yaw=180도에서 10�
 
 ```bash
 # 단일/여러 CSV로 배포용 모델 학습 (항상 마지막에 80/20 분할로 저장됨)
-python train_wind_estimator.py ../logs/wind_random_20260808_005015_n35_speed4-11_seed77.csv
+python train_wind_estimator.py ../logs/wind_random_20260808_052538_yaw0p0_n12x15_seed1042.csv
 python train_wind_estimator.py ../logs/wind_random_*.csv ../logs/wind_gust_*.csv
 
 # k-fold 교차검증만 (모델 저장 안 함, 성능 안정성 확인용)
 python train_wind_estimator.py ../logs/wind_random_*.csv ../logs/wind_gust_*.csv --kfold 5
 ```
 
-`wind_estimator.pt`는 이 스크립트의 산출물이며, `pinn_wind_correction_test.py` /
-`pinn_wind_correction_sweep.py`가 실행 시 자동으로 로드해서 씀 — 따로 실행할 파일은
+`wind_estimator.pt`는 이 스크립트의 산출물이며, `pinn_wind_correction_sweep.py` /
+`pinn_wind_correction_gust_sweep.py`가 실행 시 자동으로 로드해서 씀 — 따로 실행할 파일은
 아님.
 
 ---
