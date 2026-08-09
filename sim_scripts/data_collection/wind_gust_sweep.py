@@ -29,6 +29,7 @@ import functools
 import math
 import os
 import random
+import subprocess
 import sys
 import time
 import traceback
@@ -240,7 +241,7 @@ async def run():
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     yaw_offset_str = f"{YAW_OFFSET_DEG:.1f}".replace(".", "p")
     speed_str = f"{BASE_SPEED_RANGE_MPS[0]:g}-{BASE_SPEED_RANGE_MPS[1]:g}"
-    csv_path = (f"../logs/wind_gust_{timestamp_str}"
+    csv_path = (f"../../logs/wind_gust_{timestamp_str}"
                 f"_yaw{yaw_offset_str}_n{N_YAW}x{N_PER_YAW}_speed{speed_str}_seed{RANDOM_SEED}.csv")
     csv_file = open(csv_path, "w", newline="")
     writer = csv.writer(csv_file)
@@ -331,6 +332,23 @@ async def run():
     csv_file.close()
     print(f"\n데이터 수집 완료. CSV 저장됨: {csv_path}")
 
+    # --- 그래프 자동 생성 (세션 그리드 PNG, 시간+조건명 폴더에 정리) ---
+    figures_dir = (f"../../figures/wind_gust_{timestamp_str}"
+                   f"_yaw{yaw_offset_str}_n{N_YAW}x{N_PER_YAW}_speed{speed_str}_seed{RANDOM_SEED}")
+    plot_python = os.path.expanduser("~/miniconda3/bin/python3")
+    plot_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plot_session_grid.py")
+    if os.path.exists(plot_python):
+        try:
+            subprocess.run(
+                [plot_python, plot_script, csv_path, "--out-dir", figures_dir],
+                check=True,
+            )
+            print(f"그래프 저장됨: {figures_dir}")
+        except subprocess.CalledProcessError as e:
+            print(f"[경고] 그래프 생성 실패 (CSV는 정상 저장됨): {e}")
+    else:
+        print(f"[경고] 그래프용 python을 못 찾음({plot_python}) - 그래프 생성 건너뜀")
+
     if send_gaps:
         n_over = sum(1 for g in send_gaps if g > 1.5 * SEND_PERIOD_S)
         print(
@@ -376,10 +394,14 @@ if __name__ == "__main__":
     parser.add_argument("--speed-min", type=float, default=BASE_SPEED_RANGE_MPS[0])
     parser.add_argument("--speed-max", type=float, default=BASE_SPEED_RANGE_MPS[1])
     parser.add_argument("--seed", type=int, default=RANDOM_SEED)
+    parser.add_argument("--episode-duration", type=float, default=EPISODE_DURATION_S,
+                         help="에피소드 하나당 관측 시간(초) - gust 주기(4~10초)를 "
+                              "최소 한 바퀴는 봐야 하므로 너무 짧게 주지 말 것")
     args = parser.parse_args()
     N_YAW = args.n_yaw
     N_PER_YAW = args.n_per_yaw
     YAW_OFFSET_DEG = args.yaw_offset
+    EPISODE_DURATION_S = args.episode_duration
     BASE_SPEED_RANGE_MPS = (args.speed_min, args.speed_max)
     RANDOM_SEED = args.seed
 

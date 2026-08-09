@@ -4,20 +4,16 @@ PINN 기반 바람(외란) 벡터 추정 모델 학습.
 목표: 최근 상태 이력(수평 속도, roll/pitch, setpoint 대비 위치오차)으로부터
 현재 바람 벡터(wind_vx, wind_vy)를 추정하는 작은 네트워크를 학습.
 
+**물리 방정식/모델 구조/하이퍼파라미터는 `wind_pinn_model.py`로 옮겨졌음** - 항력
+방정식이나 WINDOW/HIDDEN/LAMBDA_PHYSICS 등을 고치고 싶으면 그 파일만 보면 됨.
+이 파일은 데이터 로딩(build_windows), 학습 루프(train_one_split), k-fold(run_kfold),
+CLI(main)만 담당.
+
 두 가지 loss를 함께 사용:
   1) data_loss: 지도학습 loss. sim_scripts/wind_random_sweep.py는 gz topic으로
      바람을 직접 설정했으므로 정답 바람벡터를 100% 정확히 알고 있음 -> MSE.
   2) physics_loss: 추정된 바람으로 계산한 공기저항 가속도가 실측(유한차분) 가속도와
-     일치해야 한다는 물리 제약(PINN residual).
-       v_rel = wind_pred(NED) - v_drone(NED)
-       a_drag_pred = k * |v_rel| * v_rel      (k = 0.5*rho*Cd*A/m, 학습 가능한 스칼라)
-       a_measured  = 유한차분(v_drone, dt)
-       physics_loss = MSE(a_drag_pred, a_measured)
-
-주의(중요): Gazebo world wind는 world_frame_orientation=ENU(x=East, y=North) 기준으로
-설정했지만, 드론 상태(vn, ve)는 PX4 local NED(x=North, y=East) 기준. 따라서 physics
-잔차를 계산할 때 반드시 축 변환(wind_north = wind_vy_enu, wind_east = wind_vx_enu)을
-거친 뒤 비교해야 함. data_loss는 라벨이 CSV의 원본(ENU) 표기와 동일하므로 변환 불필요.
+     일치해야 한다는 물리 제약(PINN residual, 식은 wind_pinn_model.physics_residual 참고).
 
 주의(중요) 2 - yaw 종속성: feature로 쓰는 roll/pitch는 기체(body) 좌표계라, 같은
 바람이라도 기수 방향(yaw)에 따라 값이 달라짐(북풍을 맞을 때 기수가 북쪽이면 주로
@@ -62,60 +58,13 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
+from wind_pinn_model import (
+    WINDOW, FEATURES, LAMBDA_PHYSICS, EPOCHS, LR, BATCH_SIZE, WEIGHT_DECAY,
+    VAL_FRACTION, WindPINN, yaw_decompose, physics_residual,
+)
+
 # 터미널/로그 파일로 리다이렉트했을 때도 실시간으로 진행상황이 보이게 항상 flush
 print = functools.partial(print, flush=True)
-
-
-WINDOW = 20          # 최근 몇 스텝(0.05s 간격이면 1.0초)을 입력으로 쓸지.
-                      # gust 데이터(주기 4~10초) 추가 후 10(0.5초)으로는 추세를 읽기엔
-                      # 정보가 부족해 보여서 20(1.0초)으로 늘림.
-# pos_err(위치오차)는 feature에서 제외함: 보정이 켜지면 pos_err의 일부가 "보정 자신이
-# setpoint를 움직여서 생긴 추종 지연"이 되어버려, 모델 출력이 자기 입력에 다시 영향을
-# 주는 폐루프가 생기고 학습 범위 밖(pos_err가 원래 <0.5m인데 보정 중엔 수 m까지 커짐)
-# 으로 나가면서 폭주함 (pinn_wind_correction_test.py 1차 실험에서 실제로 발산 확인됨).
-# vn/ve/roll/pitch는 보정에 의해 setpoint가 바로 바뀌어도 pos_err만큼 직접적/즉각적으로
-# 오염되지 않아 상대적으로 안전함.
-# roll_deg/pitch_deg 원본 대신 yaw와의 곱항 4개를 씀 - 위 "주의 2" 참고.
-# (roll*cos, roll*sin, pitch*cos, pitch*sin) - 정확한 결합 계수는 신경망이 배움.
-FEATURES = ["vn_m_s", "ve_m_s", "roll_cos_yaw", "roll_sin_yaw", "pitch_cos_yaw", "pitch_sin_yaw"]
-
-
-def yaw_decompose(roll_deg, pitch_deg, yaw_deg):
-    """roll/pitch를 yaw의 sin/cos와 각각 곱해 4개 항으로 분해.
-    "주의 2"에서 실패한 손유도 회전(대칭 가정)과 달리, 이 4개 항은 대칭을 가정하지
-    않는 가장 일반적인 1차 후보 기저임 - roll/pitch 축의 게인이 서로 달라도 신경망의
-    선형 입력층이 각 항에 다른 가중치를 줄 수 있어 흡수 가능. 스칼라/numpy 배열 지원."""
-    yaw_rad = np.radians(yaw_deg)
-    cos_y, sin_y = np.cos(yaw_rad), np.sin(yaw_rad)
-    return roll_deg * cos_y, roll_deg * sin_y, pitch_deg * cos_y, pitch_deg * sin_y
-HIDDEN = 64           # 128로 키웠다가 극심한 과적합(train_loss~0, val 전혀 개선 안 됨)
-                       # 확인하고 64로 되돌림 - 지금 데이터양엔 이게 맞음
-LAMBDA_PHYSICS = 0.05
-EPOCHS = 400
-LR = 1e-3
-BATCH_SIZE = 256      # 풀배치 대신 미니배치 - 이질적인 두 데이터(고정/gust)를 섞어
-                       # 학습할 때 그래디언트가 "전체 평균"으로 뭉개지는 것 완화
-WEIGHT_DECAY = 1e-3   # 과적합 억제용 L2 정규화
-VAL_FRACTION = 0.2   # (k-fold 안 쓸 때) condition 단위로 분리
-
-
-class WindPINN(nn.Module):
-    def __init__(self, window, n_features, hidden=HIDDEN):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(window * n_features, hidden), nn.ReLU(),
-            nn.Linear(hidden, hidden), nn.ReLU(),
-            nn.Linear(hidden, 2),
-        )
-        # 항력계수 묶음항 k = 0.5*rho*Cd*A/m (미지수, 데이터로부터 학습)
-        self.log_k = nn.Parameter(torch.tensor(-2.0))
-
-    def forward(self, x):
-        return self.net(x)
-
-    @property
-    def k(self):
-        return torch.exp(self.log_k)
 
 
 def build_windows(df: pd.DataFrame):
@@ -158,19 +107,6 @@ def build_windows(df: pd.DataFrame):
     vdrone = np.asarray(vdrone_list, dtype=np.float32)
     cond = np.asarray(cond_list)
     return X, y, acc, vdrone, cond
-
-
-def physics_residual(model, wind_pred_enu, v_drone_ned):
-    """wind_pred_enu: (B,2) = [vx_enu(East), vy_enu(North)] 모델 출력(라벨과 동일 표기).
-    ENU -> NED 변환 후 항력 가속도 예측."""
-    wind_north = wind_pred_enu[:, 1]
-    wind_east = wind_pred_enu[:, 0]
-    v_rel_n = wind_north - v_drone_ned[:, 0]
-    v_rel_e = wind_east - v_drone_ned[:, 1]
-    speed_rel = torch.sqrt(v_rel_n ** 2 + v_rel_e ** 2 + 1e-6)
-    a_pred_n = model.k * speed_rel * v_rel_n
-    a_pred_e = model.k * speed_rel * v_rel_e
-    return torch.stack([a_pred_n, a_pred_e], dim=1)
 
 
 def train_one_split(X, y, acc, vdrone, train_mask, val_mask, verbose=False):

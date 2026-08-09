@@ -201,7 +201,7 @@ async def run():
     print(f"  -> yaw {latest_att['yaw']:.1f}도로 안정화")
 
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = f"../logs/wind_yawtest_{TARGET_YAW_DEG:.0f}deg_{timestamp_str}.csv"
+    csv_path = f"../../logs/wind_yawtest_{TARGET_YAW_DEG:.0f}deg_{timestamp_str}.csv"
     csv_file = open(csv_path, "w", newline="")
     writer = csv.writer(csv_file)
     writer.writerow([

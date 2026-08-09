@@ -35,6 +35,8 @@ set -uo pipefail
 PX4_DIR="$HOME/MyProjects/PX4-Autopilot"
 PROJECT_DIR="$HOME/MyProjects/quad-pinn-project"
 PX4SIM_PYTHON="$HOME/miniconda3/envs/px4sim/bin/python"
+PLOT_PYTHON="$HOME/miniconda3/bin/python3"   # matplotlib/pandas 있는 base 환경 (px4sim/pinn_train엔 없음)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SESSIONS=4
 N_YAW=24
 N_PER_YAW=10
@@ -43,6 +45,7 @@ SEED_BASE=42
 BOOT_WAIT_S=15
 START_SESSION=1
 MAX_RETRIES=3
+PLOT_ENABLED=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -52,6 +55,7 @@ while [[ $# -gt 0 ]]; do
         --trial-duration) TRIAL_DURATION="$2"; shift 2 ;;
         --seed-base) SEED_BASE="$2"; shift 2 ;;
         --start-session) START_SESSION="$2"; shift 2 ;;
+        --no-plot) PLOT_ENABLED=0; shift ;;
         *) echo "알 수 없는 옵션: $1"; exit 1 ;;
     esac
 done
@@ -71,6 +75,16 @@ echo "=== 총 예상 조건 수: $((TOTAL_PER_SESSION * SESSIONS)) ==="
 echo "=== 세션들을 합친 yaw 해상도: ${COMBINED_YAW_POINTS}지점 (${COMBINED_YAW_STEP}도 간격) ==="
 echo "=== 예상 총 소요시간: 약 ${EST_HOURS}시간 (대략적인 추정치) ==="
 echo "=== 세션당 강제종료 타임아웃: ${SESSION_TIMEOUT_S}초 ==="
+
+# 이번 실행에서 나오는 PNG를 전부 시간+조건명 폴더 하나에 모음 (여러 번 실행해도 안 섞이게)
+RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+FIGURES_RUN_DIR="$PROJECT_DIR/figures/wind_random_${RUN_TIMESTAMP}_n${N_YAW}x${N_PER_YAW}_td${TRIAL_DURATION}"
+if [[ "$PLOT_ENABLED" -eq 1 ]]; then
+    mkdir -p "$FIGURES_RUN_DIR"
+    echo "=== 그래프 저장 폴더: ${FIGURES_RUN_DIR} ==="
+fi
+SESSION_CSVS=()
+SESSION_PNGS=()
 
 restart_sitl() {
     echo "  [SITL] 기존 프로세스 정리 중 (정상종료 시도)..."
@@ -128,7 +142,7 @@ for i in $(seq "$START_SESSION" "$SESSIONS"); do
     for attempt in $(seq 1 "$MAX_RETRIES"); do
         restart_sitl
         echo "  [수집] 시작 (seed=${session_seed}, yaw-offset=${yaw_offset}도, 시도 ${attempt}/${MAX_RETRIES}, 타임아웃 ${SESSION_TIMEOUT_S}초)"
-        if (cd "$PROJECT_DIR/sim_scripts" && \
+        if (cd "$PROJECT_DIR/sim_scripts/data_collection" && \
             timeout -k 15 "${SESSION_TIMEOUT_S}s" \
             "$PX4SIM_PYTHON" -u wind_random_sweep.py \
                 --n-yaw "$N_YAW" --n-per-yaw "$N_PER_YAW" \
@@ -136,6 +150,19 @@ for i in $(seq "$START_SESSION" "$SESSIONS"); do
                 --yaw-offset "$yaw_offset" --seed "$session_seed"); then
             echo "  [수집] 세션 ${i} 완료 (시도 ${attempt}/${MAX_RETRIES})"
             session_ok=1
+            if [[ "$PLOT_ENABLED" -eq 1 ]]; then
+                latest_csv=$(ls -t "$PROJECT_DIR"/logs/wind_random_*.csv 2>/dev/null | head -1)
+                if [[ -n "$latest_csv" ]]; then
+                    echo "  [그래프] ${latest_csv} 요약 PNG 생성 중..."
+                    if "$PLOT_PYTHON" "$SCRIPT_DIR/plot_session_grid.py" "$latest_csv" \
+                            --out-dir "$FIGURES_RUN_DIR" 2>&1 | sed 's/^/    /'; then
+                        SESSION_CSVS+=("$latest_csv")
+                        SESSION_PNGS+=("$FIGURES_RUN_DIR/session_$(basename "${latest_csv%.csv}").png")
+                    else
+                        echo "  [경고] PNG 생성 실패 (수집된 CSV 데이터는 정상이니 나중에 수동으로 다시 그리면 됨)"
+                    fi
+                fi
+            fi
             break
         else
             echo "  [수집] 세션 ${i} 시도 ${attempt}/${MAX_RETRIES} 실패 (exit code $?)"
@@ -152,6 +179,18 @@ echo "############################################################"
 echo "# 전체 완료: ${SESSIONS}개 세션 중 $((SESSIONS - FAILED_SESSIONS))개 성공, ${FAILED_SESSIONS}개 실패"
 echo "# 결과 CSV: ${PROJECT_DIR}/logs/wind_random_*.csv"
 echo "############################################################"
+
+if [[ "$PLOT_ENABLED" -eq 1 && "${#SESSION_CSVS[@]}" -gt 0 ]]; then
+    echo ""
+    echo "  [그래프] 세션 ${#SESSION_CSVS[@]}개 통합 요약(모자이크+전체 겹침) 생성 중..."
+    if ! "$PLOT_PYTHON" "$SCRIPT_DIR/plot_combined_summary.py" \
+            --pngs "${SESSION_PNGS[@]}" \
+            --csvs "${SESSION_CSVS[@]}" \
+            --out-dir "$FIGURES_RUN_DIR" 2>&1 | sed 's/^/    /'; then
+        echo "  [경고] 통합 요약 PNG 생성 실패 (세션별 PNG는 이미 저장돼 있음)"
+    fi
+    echo "  [그래프] 전체 결과: ${FIGURES_RUN_DIR}"
+fi
 
 echo "  [정리] 마지막 SITL 종료 중..."
 pkill -9 -f "px4_sitl_default/bin/px4" 2>/dev/null

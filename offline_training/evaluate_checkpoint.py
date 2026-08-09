@@ -18,7 +18,8 @@ import numpy as np
 import pandas as pd
 import torch
 
-from train_wind_estimator import WindPINN, build_windows
+from wind_pinn_model import WindPINN
+from train_wind_estimator import build_windows
 
 
 def main():

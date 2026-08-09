@@ -214,8 +214,9 @@ async def run():
     # --- CSV 파일 준비 ---
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     yaw_offset_str = f"{YAW_OFFSET_DEG:.1f}".replace(".", "p")
-    csv_path = (f"../logs/wind_random_{timestamp_str}"
-                f"_yaw{yaw_offset_str}_n{N_YAW}x{N_PER_YAW}_seed{RANDOM_SEED}.csv")
+    speed_str = f"{WIND_SPEED_RANGE_MPS[0]:g}-{WIND_SPEED_RANGE_MPS[1]:g}"
+    csv_path = (f"../../logs/wind_random_{timestamp_str}"
+                f"_yaw{yaw_offset_str}_n{N_YAW}x{N_PER_YAW}_speed{speed_str}_seed{RANDOM_SEED}.csv")
     csv_file = open(csv_path, "w", newline="")
     writer = csv.writer(csv_file)
     writer.writerow([

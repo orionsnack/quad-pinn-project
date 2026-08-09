@@ -74,9 +74,14 @@ PX4 SITL + Gazebo(Harmonic) + MAVSDK-Python 환경을 구축하고, Offboard 제
 ## 폴더 구조
 
 ```
-sim_scripts/          MAVSDK 실험 스크립트 (연결 테스트부터 PINN 보정 A/B까지)
-offline_training/      PINN 학습 코드 + 학습된 모델(wind_estimator.pt)
-logs/                  실험 결과 CSV
+sim_scripts/
+  data_collection/       PINN 학습용 데이터 수집 (wind_random/gust_sweep, yaw 검증, 오케스트레이션)
+  correction_experiments/ PINN 보정 A/B·파라미터 튜닝
+offline_training/        PINN 학습 코드 + 학습된 모델(wind_estimator.pt)
+logs/                     실험 결과 CSV
+figures/                  수집 실행별(시간+조건명) 폴더에 정리된 요약 PNG
+  wind_random_TIMESTAMP_n{N}x{M}_td{S}/   세션별 격자 PNG + 전체 모자이크/겹침 PNG
+  wind_gust_TIMESTAMP_yaw..._seed.../     gust 수집 1회분 격자 PNG
 ```
 자세한 파일별 설명은 아래 8절 참고.
 
@@ -99,41 +104,55 @@ logs/                  실험 결과 CSV
 
 ## 8. 작성한 테스트 스크립트들
 
-모두 `sim_scripts/`에 저장. 실행 전 항상 WSL 다른 터미널에서 PX4 SITL(`pxh>`)이 돌고 있어야 함.
+`sim_scripts/`는 용도별로 두 하위 폴더로 나뉨: 데이터 수집은 `data_collection/`,
+PINN 보정 A/B·튜닝 실험은 `correction_experiments/`. 아래 각 스크립트는 그 폴더
+안에서(`cd sim_scripts/data_collection` 또는 `cd sim_scripts/correction_experiments`)
+실행하는 걸 전제로 함. 실행 전 항상 WSL 다른 터미널에서 PX4 SITL(`pxh>`)이 돌고
+있어야 함.
 
 ### 8-7. `wind_random_sweep.py` — PINN 학습용 무작위 바람 데이터 수집 (고정바람)
 
 초기 `wind_sweep_baseline.py`(고정 5조건 calm/light/default/strong/crosswind로 물리
 검증만 하던 스크립트, 목적 완료 후 제거 - `gz topic`으로 바람을 런타임에 바꾸는
 `set_wind()` 패턴과 "바람이 강할수록 roll/pitch가 단조 증가, crosswind는 pitch 대신
-roll로 쏠림"이라는 물리적으로 타당한 패턴 확인이 성과였음)보다 훨씬 다양하게: 풍속
-0~10m/s, 방향 0~360°를
-무작위로 40개 뽑아서(고정 시드=42, 재현 가능) 각 8초씩 호버링하며 상태(속도/자세)를
-20Hz로 기록. `gz topic`으로 직접 설정한 값이라 **정답 바람벡터를 100% 정확히 앎** →
-지도학습 라벨로 그대로 사용 가능. 결과는 `../logs/wind_random_TIMESTAMP.csv`.
+roll로 쏠림"이라는 물리적으로 타당한 패턴 확인이 성과였음)보다 훨씬 다양하게: yaw(기수
+방향)를 그리드로 등분하며 회전하고, 각 yaw마다 풍속 0~10m/s·방향 0~360°를 무작위로
+뽑은 조건을 여러 개(고정 시드, 재현 가능) 호버링하며 상태(속도/자세)를 20Hz로 기록.
+yaw도 그리드로 도는 이유는 12-10절 참고 (roll/pitch가 yaw에 종속적이라 다양한 yaw로
+안 모으면 모델이 특정 방향에서만 통함). `gz topic`으로 직접 설정한 값이라 **정답
+바람벡터를 100% 정확히 앎** → 지도학습 라벨로 그대로 사용 가능. 결과는
+`../../logs/wind_random_TIMESTAMP_yaw{offset}_n{yaw수}x{yaw당조건수}_speed{범위}_seed{시드}.csv`.
 
-`--n`, `--speed-min`, `--speed-max`, `--seed` 옵션으로 특정 구간(예: 강풍 위주)만
-집중해서 추가로 모을 수 있음.
+`--n-yaw`(yaw 그리드 개수, 기본 24), `--n-per-yaw`(yaw 하나당 무작위 바람 조건 수,
+기본 10), `--yaw-offset`(그리드 시작점을 밀기, 기본 0), `--trial-duration`(조건당
+관측 시간(초), 기본 8), `--speed-min`/`--speed-max`/`--seed` 옵션 지원.
 
 ```bash
 python wind_random_sweep.py
-python wind_random_sweep.py --n 35 --speed-min 4 --speed-max 11 --seed 77   # 강풍 위주 추가 수집 예시
+python wind_random_sweep.py --n-yaw 6 --n-per-yaw 10 --speed-min 4 --speed-max 11   # 강풍 위주 추가 수집 예시
 ```
 
 ### 8-7-1. `wind_gust_sweep.py` — PINN 학습용 gust(시간에 따라 변하는 바람) 데이터 수집
 
 `wind_random_sweep.py`는 한 트라이얼 내내 바람이 고정이었음. 이건 에피소드마다
 `vx(t)=base+amp*sin(2πt/period+phase)` 형태로 바람이 계속 변하도록 해서, "지금 이
-순간의 바람을 실시간 추적"하는 걸 배우게 하는 데이터. 기본 15개 에피소드(20초씩).
-Gazebo에는 `GUST_UPDATE_INTERVAL_S`(1.0초) 간격으로만 갱신해서 보내지만(계단식 근사,
-너무 자주 호출하면 `gz topic pub` 프로세스 spawn 비용 때문에 확 느려짐 - 처음 0.25초로
-했다가 26분 걸려서 1.0초로 늘림), CSV 라벨은 매 로그 순간의 정확한 연속함수 값을 씀.
-`wind_random_sweep.py`와 동일하게 `--n`/`--speed-min`/`--speed-max`/`--seed` 지원.
-결과 CSV 파일명에도 이 값들이 그대로 들어감(예: `wind_gust_TIMESTAMP_n15_speed1-8_seed123.csv`).
+순간의 바람을 실시간 추적"하는 걸 배우게 하는 데이터. Gazebo에는
+`GUST_UPDATE_INTERVAL_S`(1.0초) 간격으로만 갱신해서 보내지만(계단식 근사, 너무 자주
+호출하면 `gz topic pub` 프로세스 spawn 비용 때문에 확 느려짐 - 처음 0.25초로 했다가
+26분 걸려서 1.0초로 늘림), CSV 라벨은 매 로그 순간의 정확한 연속함수 값을 씀.
+`wind_random_sweep.py`와 동일하게 yaw 그리드(`--n-yaw`/`--n-per-yaw`/`--yaw-offset`,
+기본 12x5=60개, 그리드로 도는 이유는 8-7절/12-10절과 동일)로 돌며 `--episode-duration`
+(에피소드당 관측 시간(초), 기본 20)/`--speed-min`/`--speed-max`/`--seed`도 지원.
+결과 CSV 파일명에도 이 값들이 그대로 들어감(예:
+`wind_gust_TIMESTAMP_yaw0p0_n12x5_speed1-8_seed123.csv`).
+
+수집이 끝나면 `plot_session_grid.py`(8-7-3절)를 자동으로 호출해서 격자 PNG를
+`../../figures/wind_gust_TIMESTAMP_..._seed.../`에 저장함 (오케스트레이션 스크립트가
+없어서 `run_yaw_collection_sessions.sh`처럼 끄는 옵션은 따로 없음).
 
 ```bash
 python wind_gust_sweep.py
-python wind_gust_sweep.py --n 12 --speed-min 4 --speed-max 10 --seed 456   # 강풍 gust 추가 수집 예시
+python wind_gust_sweep.py --n-per-yaw 8 --speed-min 4 --speed-max 10 --seed 456   # 강풍 gust 추가 수집 예시
 ```
 
 ### 8-7-2. `run_yaw_collection_sessions.sh` — yaw 그리드 데이터 수집 오케스트레이션
@@ -147,13 +166,21 @@ python wind_gust_sweep.py --n 12 --speed-min 4 --speed-max 10 --seed 456   # 강
 들어가서(예: `wind_random_20260808_231716_yaw12p0_n12x15_seed7042.csv`), 파일명만 보고도
 어느 세션(어느 offset)인지 구분 가능함.
 
+실행마다 `figures/wind_random_TIMESTAMP_n{yaw수}x{yaw당조건수}_td{트라이얼길이}/`
+폴더를 하나 만들고, 세션 하나가 끝날 때마다 `plot_session_grid.py`를 자동으로
+호출해서 그 세션의 12개 yaw × 조건당 위치오차 시계열을 3x4 격자 PNG로 그 폴더 안에
+저장함. 모든 세션이 끝나면 `plot_combined_summary.py`를 한 번 더 호출해서 세션별
+격자 PNG를 5열 모자이크(`all_sessions_montage.png`) 하나로 합치고, 전체 세션의 모든
+트라이얼을 원본 CSV에서 다시 읽어 하나의 그래프에 겹친 `all_trials_overlay.png`도
+같은 폴더에 저장함 (`--no-plot`으로 이 셋 다 끌 수 있음). 아래 8-7-3절/8-7-4절 참고.
+
 **실행 (터미널을 나중에 닫아도 계속 돌게, 로그는 실시간으로 파일에 쌓이게):**
 
 ```bash
-cd ~/MyProjects/quad-pinn-project/sim_scripts
-nohup ./run_yaw_collection_sessions.sh --sessions 15 --n-yaw 12 --n-per-yaw 15 --trial-duration 15 > ../logs/collection_run.log 2>&1 &
+cd ~/MyProjects/quad-pinn-project/sim_scripts/data_collection
+nohup ./run_yaw_collection_sessions.sh --sessions 15 --n-yaw 12 --n-per-yaw 15 --trial-duration 15 > ../../logs/collection_run.log 2>&1 &
 disown
-tail -f ../logs/collection_run.log
+tail -f ../../logs/collection_run.log
 ```
 
 중간에 끊겨서 특정 세션부터 이어서 돌리고 싶으면 `--start-session N` 추가 (offset/seed는
@@ -174,6 +201,39 @@ SITL/포트를 두 프로세스가 나눠 쓰면서 서로 충돌**하니, 재�
 가능성이 1순위 의심 대상임 — 지우면(또는 이름 바꿔 백업하면) PX4가 기본값으로 새로
 만듦. 세션 사이 `pkill -9`로 강제종료를 반복하는 구조라 이 파일의 자기장 캘리브레이션
 값이 가끔 깨지는 것으로 추정됨 (2026-08-08 밤 실제로 이걸로 세션 7이 계속 멈췄었음).
+
+### 8-7-3. `plot_session_grid.py` — 세션 하나를 3x4 격자 PNG로 요약
+
+세션 CSV 하나(yaw 12개 x 조건당 N개)를 읽어서, yaw별로 subplot 하나씩(3x4=12개)
+만들고 그 안에 해당 yaw의 모든 조건의 위치오차 시계열을 겹쳐 그림 (선 색 = 풍속).
+`run_yaw_collection_sessions.sh`가 세션이 끝날 때마다, `wind_gust_sweep.py`(8-7-1절)가
+수집을 마칠 때마다 자동으로 호출하지만, 특정 CSV 하나만 다시 그리고 싶을 때 수동으로도
+씀:
+
+```bash
+python plot_session_grid.py ../../logs/wind_random_TIMESTAMP_yaw12p0_n12x15_seed7042.csv
+```
+
+한글 라벨 때문에 WSL에 없는 한글 폰트가 필요해서, Windows 쪽 Noto Sans KR
+(`/mnt/c/Windows/Fonts/NotoSansKR-VF.ttf`)을 직접 지정해서 씀 — 그 경로가 없는
+환경에서는 경고만 찍고 기본 폰트로 넘어감(스크립트가 죽지는 않음). `matplotlib`/
+`pandas`가 필요한데 `px4sim`/`pinn_train` 환경엔 없어서, 이 스크립트만 miniconda
+`base` 환경 python으로 실행함 (호출하는 쪽에서 자동으로 그렇게 함).
+
+### 8-7-4. `plot_combined_summary.py` — 여러 세션을 모자이크+전체 겹침으로 합치기
+
+`run_yaw_collection_sessions.sh`가 세션을 전부 끝낸 뒤 자동으로 호출함. 두 가지를
+만듦: (1) 세션별 격자 PNG(8-7-3절 산출물)들을 5열 모자이크 하나로 축소해서 붙인
+`all_sessions_montage.png`, (2) 모든 세션의 모든 조건(위치오차 시계열)을 원본 CSV에서
+직접 읽어 선 하나의 그래프에 다 겹친 `all_trials_overlay.png` (색=풍속, 선 투명도를
+낮춰서 밀도로 보이게 함). 특정 PNG/CSV 묶음을 다시 합치고 싶을 때 수동 실행도 가능:
+
+```bash
+python plot_combined_summary.py --pngs ../../figures/RUN/session_*.png \
+    --csvs ../../logs/wind_random_*_yaw*.csv --out-dir ../../figures/RUN
+```
+
+`plot_session_grid.py`와 마찬가지로 miniconda `base` 환경 python으로 실행.
 
 ### 8-10. `pinn_wind_correction_sweep.py` — PINN 보정 다중 조건 A/B 스윕
 
@@ -213,8 +273,6 @@ python train_wind_estimator.py ../logs/wind_random_*.csv ../logs/wind_gust_*.csv
 | QGC가 "Disconnected"로 안 붙음 | WSL2와 Windows 네트워크 분리 문제. `.wslconfig`에 `networkingMode=mirrored` 설정 후 `wsl --shutdown` |
 | MAVSDK `udp://` deprecated 경고 | `udpin://` 또는 `udpout://`로 명시 (`udpin://0.0.0.0:14540` 형태 권장) |
 | yaw 텔레메트리 값이 실시간 반영 안 됨(계속 같은 값) | `anext()`를 필요할 때만 호출하는 방식의 스트림 적체 문제. 백그라운드 태스크로 계속 소비하며 최신값만 저장하는 방식으로 변경 |
-| Offboard 회전 명령이 불규칙하게 동작(멈췄다 움직였다) | (해결됨) takeoff 후 고정 5초 sleep만으로 Offboard 진입하면 목표고도 도달 전에 낮은 고도가 고정되며 yaw가 무시됨 — 고정 sleep 대신 `telemetry.position()`으로 실제 고도 확인 후 Offboard 진입하도록 수정 |
-| PINN 보정 켜니 위치오차가 계속 커지다 발산(roll/pitch 수십도까지) | (해결됨) 12-3절 참고 — 모델 입력(pos_err)이 보정 자신의 영향을 다시 입력받는 폐루프였음. position을 흔드는 방식 자체를 버리고 가속도 피드포워드로 구조 변경 |
 | 같은 조건인데 A/B 테스트 결과가 이전 실행과 크게 다름(특히 calm 베이스라인이 갑자기 커짐) | 12-8절에서 **단 1회** 관측됨(SITL 65분 연속 실행 후). "장시간 실행이 원인"이라는 건 검증 안 된 가설이지 확립된 규칙이 아님 — 재현 실험은 안 해봤음. 다만 이상하게 튀는 결과가 나오면 SITL을 재시작해서 재현되는지 확인해볼 가치는 있음 |
 | `make px4_sitl` 재구성 중 `kconfiglib is not installed` 에러, 심하면 `build/px4_sitl_default` 폴더 자체가 사라짐 | CMake가 Python3를 찾을 때 PATH상 `px4sim` conda 환경의 python을 잡는 경우가 있는데, 거기엔 PX4 빌드용 패키지(`kconfiglib` 등)가 없어서 재구성이 실패하며 빌드 폴더를 정리해버림. `environment-px4sim.yml`에 `PX4-Autopilot/Tools/setup/requirements.txt` 전체를 포함시켜 재발 방지함 (`conda env update -f environment-px4sim.yml`로 기존 환경에도 추가 가능) |
 | `HEADLESS=1 make px4_sitl ...`를 백그라운드로 오래 돌리면 출력 파일이 수 GB까지 불어남 | PX4의 `pxh>` 콘솔이 진짜 터미널이 아닌 파이프로 연결되면 프롬프트를 계속 지우고 다시 그리는(ANSI escape) 동작을 무한 반복하는 것뿐 — SITL 자체는 정상 동작. 출력을 `> /dev/null 2>&1`로 버리고 백그라운드로 띄우면 문제없음 |
@@ -287,8 +345,8 @@ python train_wind_estimator.py ../logs/wind_random_*.csv ../logs/wind_gust_*.csv
   `k`(=0.5·ρ·Cd·A/m 묶음항)는 상수를 미리 정하지 않고 학습 가능한 파라미터로 둬서
   데이터로부터 스스로 찾게 함 → 최종 `k ≈ 0.089~0.096`.
   > 주의: Gazebo world wind는 ENU(x=East,y=North), 드론 로컬좌표는 PX4 NED(x=North,
-  > y=East) 라서 물리 잔차 계산 시 축을 바꿔줘야 함 (`train_wind_estimator.py`의
-  > `physics_residual()` 주석 참고).
+  > y=East) 라서 물리 잔차 계산 시 축을 바꿔줘야 함 (`wind_pinn_model.py`의
+  > `physics_residual()` 참고 - 방정식/모델/하이퍼파라미터는 전부 이 파일에 모여있음).
 - **학습 결과** (미학습 바람조건 8개로 검증): 풍속(speed) MAE **0.37~0.50 m/s**
   (평균 실제 풍속 4.6m/s 대비). 과적합 방지를 위해 마지막 epoch이 아니라 validation
   MAE가 가장 낮았던 시점의 체크포인트를 저장하도록 함.

@@ -2,14 +2,14 @@
 # run_yaw_collection_sessions.sh가 멈췄는지(hang) 감시하는 워치독.
 # "진행 신호(heartbeat)"로 collection_run.log의 수정시각과 가장 최근
 # wind_random_*.csv의 수정시각 중 더 최근 것을 씀 - 세션 시작 시점(로그에 찍힘)과
-# 실제 비행 중 CSV flush(조건마다, wind_random_sweep.py:275) 둘 다를 커버함.
+# 실제 비행 중 CSV flush(조건마다, wind_random_sweep.py의 csv_file.flush()) 둘 다를 커버함.
 #
 # 사용법:
 #   ./watch_collection.sh
-#   ./watch_collection.sh --log ../logs/collection_run.log --stall-min 5 --interval-s 60
+#   ./watch_collection.sh --log ../../logs/collection_run.log --stall-min 5 --interval-s 60
 
-LOG_FILE="../logs/collection_run.log"
-LOGS_DIR="../logs"
+LOG_FILE="../../logs/collection_run.log"
+LOGS_DIR="../../logs"
 STALL_MIN=5
 INTERVAL_S=60
 PROC_PATTERN="run_yaw_collection_sessions.sh"

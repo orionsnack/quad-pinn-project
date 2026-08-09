@@ -31,8 +31,8 @@ import torch
 from mavsdk import System
 from mavsdk.offboard import (OffboardError, PositionNedYaw, VelocityNedYaw, AccelerationNed)
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "offline_training"))
-from train_wind_estimator import WindPINN, WINDOW, FEATURES, yaw_decompose  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "offline_training"))
+from wind_pinn_model import WindPINN, WINDOW, FEATURES, yaw_decompose  # noqa: E402
 
 
 # ============================================================
@@ -62,7 +62,7 @@ LOG_INTERVAL_S = 0.05
 SEND_RATE_HZ = 20.0
 SEND_PERIOD_S = 1.0 / SEND_RATE_HZ
 
-MODEL_PATH = Path(__file__).parent.parent / "offline_training" / "wind_estimator.pt"
+MODEL_PATH = Path(__file__).parent.parent.parent / "offline_training" / "wind_estimator.pt"
 
 
 async def set_wind(vx, vy, vz=0.0):
@@ -254,7 +254,7 @@ async def run():
     sender_task = asyncio.create_task(offboard_sender())
 
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = f"../logs/pinn_correction_gust_sweep_{timestamp_str}.csv"
+    csv_path = f"../../logs/pinn_correction_gust_sweep_{timestamp_str}.csv"
     csv_file = open(csv_path, "w", newline="")
     writer = csv.writer(csv_file)
     writer.writerow([

@@ -179,24 +179,31 @@ cd ~/MyProjects/quad-pinn-project/sim_scripts
     ├── environment-px4sim.yml             # px4sim conda 환경 재현용 (7-1절)
     ├── environment-pinn_train.yml         # pinn_train conda 환경 재현용 (7-1절)
     ├── sim_scripts/                       # MAVSDK 테스트/실험 스크립트 (README 8절 참고)
-    │   ├── wind_random_sweep.py
-    │   ├── wind_gust_sweep.py
-    │   ├── run_yaw_collection_sessions.sh
-    │   ├── watch_collection.sh
-    │   ├── wind_yaw_generalization_test.py
-    │   ├── pinn_wind_correction_sweep.py
-    │   ├── pinn_wind_correction_gust_sweep.py
-    │   └── pinn_correction_param_tuning.py
+    │   ├── data_collection/               # PINN 학습용 데이터 수집
+    │   │   ├── wind_random_sweep.py
+    │   │   ├── wind_gust_sweep.py
+    │   │   ├── run_yaw_collection_sessions.sh
+    │   │   ├── watch_collection.sh
+    │   │   ├── wind_yaw_generalization_test.py
+    │   │   ├── plot_session_grid.py
+    │   │   └── plot_combined_summary.py
+    │   └── correction_experiments/        # PINN 보정 A/B·파라미터 튜닝
+    │       ├── pinn_wind_correction_sweep.py
+    │       ├── pinn_wind_correction_gust_sweep.py
+    │       └── pinn_correction_param_tuning.py
     ├── offline_training/                  # PINN 학습 파이프라인
+    │   ├── wind_pinn_model.py
     │   ├── train_wind_estimator.py
     │   ├── evaluate_checkpoint.py
     │   └── wind_estimator.pt             # 학습된 모델 체크포인트
-    └── logs/                              # 실험 결과 CSV (wind_random_*, wind_gust_*, pinn_correction_*)
+    ├── logs/                              # 실험 결과 CSV (wind_random_*, wind_gust_*, pinn_correction_*)
+    └── figures/                           # 수집 실행별(시간+조건명) 폴더에 정리된 요약 PNG
+        └── wind_random_TIMESTAMP_n{N}x{M}_td{S}/   # 세션별 격자 PNG + 모자이크 + 전체 겹침
 ```
 
 > 참고: 초기 스크립트들은 결과 CSV를 `sim_scripts/` 안에 그냥 저장하도록 되어 있었음.
-> `wind_random_sweep.py`부터는 `../logs/`에 저장하도록 통일함 - 앞으로 작성하는
-> 스크립트도 이 규칙을 따를 것.
+> `wind_random_sweep.py`부터는 `../../logs/`(지금은 `sim_scripts/`의 하위 폴더에서
+> 실행하므로 두 단계 위)에 저장하도록 통일함 - 앞으로 작성하는 스크립트도 이 규칙을 따를 것.
 >
 > 초기 검증용 스크립트들(`test_connection.py`, `arm_takeoff_land.py`,
 > `offboard_velocity_test.py`, `yaw_rate_sweep_test.py`, `wind_disturbance_baseline.py`,
