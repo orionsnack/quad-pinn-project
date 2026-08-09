@@ -54,12 +54,16 @@ N번 학습/검증을 반복하고 평균±표준편차로 훨씬 안정적인 �
 """
 
 import argparse
+import functools
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+
+# 터미널/로그 파일로 리다이렉트했을 때도 실시간으로 진행상황이 보이게 항상 flush
+print = functools.partial(print, flush=True)
 
 
 WINDOW = 20          # 최근 몇 스텝(0.05s 간격이면 1.0초)을 입력으로 쓸지.
@@ -216,10 +220,10 @@ def train_one_split(X, y, acc, vdrone, train_mask, val_mask, verbose=False):
             best_epoch = epoch
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
 
-        if verbose and (epoch % 50 == 0 or epoch == 1):
+        if verbose and (epoch % 5 == 0 or epoch == 1):
             print(f"  epoch {epoch:4d}  train_data_loss={data_loss_avg:.4f}  "
                   f"physics_loss={physics_loss_avg:.4f}  val_MAE={val_mae:.3f}m/s  "
-                  f"k={model.k.item():.4f}")
+                  f"k={model.k.item():.4f}", flush=True)
 
     model.load_state_dict(best_state)
     model.eval()

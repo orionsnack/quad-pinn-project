@@ -1,7 +1,9 @@
 # PX4 SITL + Gazebo + MAVSDK 시뮬레이션 환경 구축 가이드
 
 **작성 목적**: 다른 컴퓨터에서도 동일한 시뮬레이션 개발 환경을 그대로 재현하기 위한 기록
+
 **프로젝트**: PINN 기반 쿼드콥터 외란 추정 및 제어 - 캡스톤 설계
+
 **검증 환경**: Windows 11 + WSL2(Ubuntu 22.04) + PX4-Autopilot + Gazebo(Harmonic) + MAVSDK-Python 3.17.2
 
 ---
@@ -10,7 +12,7 @@
 
 - Windows 11 (WSLg를 통한 GUI 지원, WSL2 미러 네트워킹 모드 사용을 위해 필요)
 - WSL2 활성화 및 Ubuntu 22.04 배포판
-- 넉넉한 디스크 공간 (PX4 소스 + 서브모듈 기준 최소 10GB 이상 권장)
+- 넉넉한 디스크 공간 (PX4 + 서브모듈 기준 최소 10GB 이상 권장)
 
 ---
 
@@ -206,7 +208,7 @@ cd ~/MyProjects/quad-pinn-project/sim_scripts
   돌리기 위해 CPU 버전 PyTorch도 추가 설치함. `environment-px4sim.yml`로 재현 가능.
   ```bash
   conda env create -f environment-px4sim.yml
-  # 또는 손으로:
+  # 직접 실행 시:
   conda activate px4sim
   pip install --index-url https://download.pytorch.org/whl/cpu torch
   pip install numpy pandas
@@ -217,7 +219,7 @@ cd ~/MyProjects/quad-pinn-project/sim_scripts
   `environment-pinn_train.yml`로 재현 가능.
   ```bash
   conda env create -f environment-pinn_train.yml
-  # 또는 손으로:
+  # 직접 실행 시:
   conda create -n pinn_train python=3.10 -y
   conda activate pinn_train
   pip install --index-url https://download.pytorch.org/whl/cpu torch
