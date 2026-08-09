@@ -179,7 +179,6 @@ cd ~/MyProjects/quad-pinn-project/sim_scripts
     ├── environment-px4sim.yml             # px4sim conda 환경 재현용 (7-1절)
     ├── environment-pinn_train.yml         # pinn_train conda 환경 재현용 (7-1절)
     ├── sim_scripts/                       # MAVSDK 테스트/실험 스크립트 (README 8절 참고)
-    │   ├── wind_sweep_baseline.py
     │   ├── wind_random_sweep.py
     │   ├── wind_gust_sweep.py
     │   ├── run_yaw_collection_sessions.sh
@@ -195,15 +194,15 @@ cd ~/MyProjects/quad-pinn-project/sim_scripts
     └── logs/                              # 실험 결과 CSV (wind_random_*, wind_gust_*, pinn_correction_*)
 ```
 
-> 참고: 초기 스크립트(`wind_sweep_baseline.py` 등)는 결과 CSV를 `sim_scripts/` 안에
-> 그냥 저장하도록 되어 있었음. `wind_random_sweep.py`부터는 `../logs/`에 저장하도록
-> 통일함 - 앞으로 작성하는 스크립트도 이 규칙을 따를 것.
+> 참고: 초기 스크립트들은 결과 CSV를 `sim_scripts/` 안에 그냥 저장하도록 되어 있었음.
+> `wind_random_sweep.py`부터는 `../logs/`에 저장하도록 통일함 - 앞으로 작성하는
+> 스크립트도 이 규칙을 따를 것.
 >
 > 초기 검증용 스크립트들(`test_connection.py`, `arm_takeoff_land.py`,
 > `offboard_velocity_test.py`, `yaw_rate_sweep_test.py`, `wind_disturbance_baseline.py`,
-> `pinn_correction_interface_test.py`, `pinn_wind_correction_test.py`)은 목적을 다
-> 마치고(버그 재현/배관 검증 등, README 9절·10절 참고) 제거함 - 필요하면 git 이력에서
-> 복원 가능.
+> `wind_sweep_baseline.py`, `pinn_correction_interface_test.py`,
+> `pinn_wind_correction_test.py`)은 목적을 다 마치고(버그 재현/배관 검증/물리 검증 등,
+> README 8절·10절 참고) 제거함 - 필요하면 git 이력에서 복원 가능.
 >
 > `runtime/`(Jetson 실시간 파이프라인)은 아직 폴더도 안 만든 상태 - README "다음 단계" 참고.
 

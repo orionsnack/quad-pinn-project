@@ -17,7 +17,6 @@
 
 | 파일 | 용도 | 필요 SITL 월드 | 실행 명령 | 결과 저장 위치 |
 |---|---|---|---|---|
-| `wind_sweep_baseline.py` | calm/light/default/strong/crosswind 5개 바람 조건을 런타임에 바꿔가며 반복 측정하는 베이스라인 스윕 | `gz_x500_windy` 필수 | `python wind_sweep_baseline.py` | `sim_scripts/wind_sweep_TIMESTAMP.csv` |
 | `wind_random_sweep.py` | PINN 학습용 데이터 수집 — yaw 12방향(그리드) x 방향당 무작위 바람조건(기본 10개)으로 호버링하며 라벨링. yaw도 그리드로 도는 이유는 README 12-9절/12-10절 참고 (roll/pitch가 yaw에 종속적이라 다양한 yaw로 안 모으면 모델이 특정 방향에서만 통함) | `gz_x500_windy` 필수 | `python wind_random_sweep.py` (옵션 아래 참고) | `../logs/wind_random_TIMESTAMP.csv` |
 | `wind_gust_sweep.py` | PINN 학습용 데이터 수집 — 바람이 사인파로 계속 변하는 gust 조건(기본 15개 에피소드) 라벨링. yaw는 그리드로 안 돌고 스폰 방향 고정(아직 미개선) | `gz_x500_windy` 필수 | `python wind_gust_sweep.py` (옵션 아래 참고) | `../logs/wind_gust_TIMESTAMP.csv` |
 | `wind_yaw_generalization_test.py` | 학습 yaw 범위와 다른 방향(기본 0도)으로 회전해서 소규모(기본 8개) 검증 데이터만 모으는 스팟체크용 — `evaluate_checkpoint.py`와 세트로 사용 | `gz_x500_windy` 필수 | `python wind_yaw_generalization_test.py` (`--yaw`, `--n` 옵션) | `../logs/wind_yawtest_{yaw}deg_TIMESTAMP.csv` |

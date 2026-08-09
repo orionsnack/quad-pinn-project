@@ -101,22 +101,13 @@ logs/                  실험 결과 CSV
 
 모두 `sim_scripts/`에 저장. 실행 전 항상 WSL 다른 터미널에서 PX4 SITL(`pxh>`)이 돌고 있어야 함.
 
-### 8-6. `wind_sweep_baseline.py` — 바람 조건 스윕 + 반복 (calm/light/default/strong/crosswind)
-
-한 번의 비행 세션 안에서 `gz topic -t /world/windy/wind -m gz.msgs.Wind -p '...'`로
-Gazebo의 바람을 **런타임에 실시간으로 바꿔가며**(SITL 재시작 불필요) 5개 조건 × 3회 반복
-호버링 + 1회 직선비행을 수집. `set_wind()` 헬퍼 함수가 이후 스크립트에서도 재사용됨.
-
-결과: 바람이 강할수록 roll/pitch 기울임이 단조 증가, crosswind(순수 옆바람)는 pitch
-대신 roll 쪽으로 쏠리는 등 물리적으로 타당한 패턴 확인.
-
-```bash
-python wind_sweep_baseline.py
-```
-
 ### 8-7. `wind_random_sweep.py` — PINN 학습용 무작위 바람 데이터 수집 (고정바람)
 
-`wind_sweep_baseline.py`(고정 5조건)보다 훨씬 다양하게: 풍속 0~10m/s, 방향 0~360°를
+초기 `wind_sweep_baseline.py`(고정 5조건 calm/light/default/strong/crosswind로 물리
+검증만 하던 스크립트, 목적 완료 후 제거 - `gz topic`으로 바람을 런타임에 바꾸는
+`set_wind()` 패턴과 "바람이 강할수록 roll/pitch가 단조 증가, crosswind는 pitch 대신
+roll로 쏠림"이라는 물리적으로 타당한 패턴 확인이 성과였음)보다 훨씬 다양하게: 풍속
+0~10m/s, 방향 0~360°를
 무작위로 40개 뽑아서(고정 시드=42, 재현 가능) 각 8초씩 호버링하며 상태(속도/자세)를
 20Hz로 기록. `gz topic`으로 직접 설정한 값이라 **정답 바람벡터를 100% 정확히 앎** →
 지도학습 라벨로 그대로 사용 가능. 결과는 `../logs/wind_random_TIMESTAMP.csv`.
