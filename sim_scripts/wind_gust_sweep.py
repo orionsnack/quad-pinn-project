@@ -11,6 +11,12 @@ Gazebo에는 GUST_UPDATE_INTERVAL_S 간격으로만 값을 갱신해서 보내�
 CSV에는 로그를 남기는 매 순간(20Hz)의 정확한 연속함수 값을 정답 라벨로 기록함
 (드론이 실제로 느끼는 바람은 계단식이라 약간의 근사 오차는 있음 - 큰 문제는 아님).
 
+yaw(기수 방향)도 그리드로 훑음 (wind_random_sweep.py와 동일한 이유 - 12-10절 참고):
+좁은 yaw로만 모은 gust 데이터로 학습하면 fixed-wind에서 겪었던 것과 같은 yaw
+일반화 실패가 재발할 위험이 있음. N_YAW개 방향으로 고르게 회전해가며, 각 방향에서
+N_PER_YAW개의 gust 에피소드를 수집. `--yaw-offset`으로 그리드 시작점을 밀 수 있음
+(여러 세션을 다른 offset으로 돌려 합치면 더 촘촘한 그리드가 됨).
+
 실행 전 조건: WSL에서 PX4 SITL이 windy 월드로 돌고 있어야 함
 (HEADLESS=1 make px4_sitl gz_x500_windy)
 """
@@ -19,18 +25,30 @@ import argparse
 import asyncio
 import csv
 import datetime
+import functools
 import math
+import os
 import random
+import sys
 import time
+import traceback
 from mavsdk import System
 from mavsdk.offboard import (OffboardError, PositionNedYaw)
+
+# 백그라운드/리다이렉트로 돌려도 진행상황이 실시간으로 보이게 항상 flush
+print = functools.partial(print, flush=True)
 
 
 # ============================================================
 # 실험 파라미터
 # ============================================================
 WORLD_NAME = "windy"
-N_EPISODES = 15
+N_YAW = 12                            # 0~330도, 30도 간격으로 고르게 (--yaw-offset과 조합)
+N_PER_YAW = 5                          # yaw 하나당 gust 에피소드 수 (총 N_YAW*N_PER_YAW)
+YAW_OFFSET_DEG = 0.0                   # 그리드 전체를 이만큼 밀어서 시작 (여러 세션을
+                                        # 다른 offset으로 돌리면 합쳤을 때 그리드가 촘촘해짐)
+YAW_SETTLE_TIMEOUT_S = 10.0
+YAW_TOLERANCE_DEG = 3.0
 RANDOM_SEED = 123               # wind_random_sweep.py(시드 42)와 겹치지 않게 다른 값 사용
 BASE_SPEED_RANGE_MPS = (1.0, 8.0)
 AMP_FRACTION_RANGE = (0.3, 0.8)  # base speed 대비 진폭 비율
@@ -45,7 +63,10 @@ GUST_UPDATE_INTERVAL_S = 1.0     # Gazebo에 실제로 새 바람값을 보내�
 WIND_SETTLE_S = 1.0
 EPISODE_SETTLE_S = 1.0
 SAFE_ALTITUDE_M = 1.5
-TAKEOFF_TIMEOUT_S = 15.0
+# 연결~offboard 시작(_preflight) 전체에 걸리는 시간 상한. SITL 재시작 직후 GPS/텔레메트리
+# 스트림이 안 올라오면 이 안의 어느 단계에서든 무한정 멈출 수 있어서 하나로 묶어 방지함
+# (wind_random_sweep.py와 동일한 문제/해법 - 2026-08-08 밤 실제로 겪었음).
+PREFLIGHT_TIMEOUT_S = 90.0
 LOG_INTERVAL_S = 0.05
 SEND_RATE_HZ = 20.0
 SEND_PERIOD_S = 1.0 / SEND_RATE_HZ
@@ -87,9 +108,15 @@ def wind_at(episode, t):
     return vx, vy
 
 
-async def run():
-    drone = System()
+def yaw_diff_deg(a, b):
+    d = (a - b + 180) % 360 - 180
+    return abs(d)
 
+
+async def _preflight(drone):
+    """연결부터 offboard 진입까지. SITL 재시작 직후 GPS/텔레메트리 스트림이 안 올라오면
+    이 단계 어딘가에서 영원히 멈출 수 있어서, run()에서 이 함수 전체를 asyncio.wait_for로
+    감싸 하나의 타임아웃으로 관리함 (wind_random_sweep.py의 _preflight와 동일한 이유)."""
     print("PX4 SITL에 연결 시도 중...")
     await drone.connect(system_address="udpin://0.0.0.0:14540")
 
@@ -114,20 +141,11 @@ async def run():
     await drone.action.takeoff()
 
     print(f"  안전 고도({SAFE_ALTITUDE_M}m) 도달 대기 중...")
-    t_start = time.monotonic()
-    reached_altitude = False
     async for position in drone.telemetry.position():
         alt = position.relative_altitude_m
         if alt >= SAFE_ALTITUDE_M:
             print(f"  -> 안전 고도 도달 (relative_altitude={alt:.2f}m)")
-            reached_altitude = True
             break
-        if time.monotonic() - t_start > TAKEOFF_TIMEOUT_S:
-            print(f"  [경고] {TAKEOFF_TIMEOUT_S:.0f}초 내에 안전 고도 미도달.")
-            break
-    if not reached_altitude:
-        await drone.action.land()
-        return
 
     # --- 모니터링 백그라운드 태스크 ---
     latest_pv = {"north": None, "east": None, "down": None,
@@ -196,20 +214,34 @@ async def run():
     )
 
     print("\n--- Offboard 모드 시작 ---")
+    await drone.offboard.start()
+
+    sender_task = asyncio.create_task(offboard_sender())
+    return latest_pv, latest_att, current_cmd, send_gaps, pv_task, att_task, sender_task
+
+
+async def run():
+    drone = System()
+
     try:
-        await drone.offboard.start()
+        (latest_pv, latest_att, current_cmd, send_gaps,
+         pv_task, att_task, sender_task) = await asyncio.wait_for(
+            _preflight(drone), timeout=PREFLIGHT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        raise RuntimeError(
+            f"이륙 준비(연결~offboard 시작)가 {PREFLIGHT_TIMEOUT_S:.0f}초를 넘음 "
+            "(SITL 재시작 문제 가능성)")
     except OffboardError as error:
         print(f"Offboard 시작 실패: {error._result.result}")
         await drone.action.land()
         return
 
-    sender_task = asyncio.create_task(offboard_sender())
-
     # --- CSV 파일 준비 ---
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    yaw_offset_str = f"{YAW_OFFSET_DEG:.1f}".replace(".", "p")
     speed_str = f"{BASE_SPEED_RANGE_MPS[0]:g}-{BASE_SPEED_RANGE_MPS[1]:g}"
     csv_path = (f"../logs/wind_gust_{timestamp_str}"
-                f"_n{N_EPISODES}_speed{speed_str}_seed{RANDOM_SEED}.csv")
+                f"_yaw{yaw_offset_str}_n{N_YAW}x{N_PER_YAW}_speed{speed_str}_seed{RANDOM_SEED}.csv")
     csv_file = open(csv_path, "w", newline="")
     writer = csv.writer(csv_file)
     writer.writerow([
@@ -221,55 +253,80 @@ async def run():
     ])
     print(f"\nCSV 로그 저장 경로: {csv_path}")
 
-    episodes = sample_gust_episodes(N_EPISODES, RANDOM_SEED)
-    print(f"\n총 {N_EPISODES}개 gust 에피소드 수집 시작 "
-          f"(에피소드당 {EPISODE_DURATION_S:.0f}초, 예상 총 소요 "
-          f"{N_EPISODES*(EPISODE_DURATION_S+WIND_SETTLE_S+EPISODE_SETTLE_S)/60:.1f}분)")
-
+    yaw_values = [(i * (360.0 / N_YAW) + YAW_OFFSET_DEG) % 360.0 for i in range(N_YAW)]
     n_steps = int(EPISODE_DURATION_S / LOG_INTERVAL_S)
     updates_per_log = max(1, round(GUST_UPDATE_INTERVAL_S / LOG_INTERVAL_S))
+    total_episodes = N_YAW * N_PER_YAW
+    print(f"\nyaw {N_YAW}방향(offset={YAW_OFFSET_DEG:.1f}도) x 방향당 gust {N_PER_YAW}개 "
+          f"= 총 {total_episodes}개 수집 시작 "
+          f"(에피소드당 {EPISODE_DURATION_S:.0f}초, 예상 총 소요 "
+          f"{total_episodes*(EPISODE_DURATION_S+WIND_SETTLE_S+EPISODE_SETTLE_S)/60:.1f}분 "
+          f"+ yaw 회전 시간)")
 
-    for ep_idx, episode in enumerate(episodes):
-        vx0, vy0 = wind_at(episode, 0.0)
-        await set_wind(vx0, vy0)
-        await asyncio.sleep(WIND_SETTLE_S)
+    ep_idx = 0
+    for yaw_idx, target_yaw in enumerate(yaw_values):
+        print(f"\n{'='*60}\n=== yaw {yaw_idx+1}/{N_YAW}: 목표 {target_yaw:.0f}도로 회전 중 "
+              f"(현재 {latest_att['yaw']:.1f}도) ===\n{'='*60}")
+        current_cmd["yaw"] = target_yaw
+        t_yaw_start = time.monotonic()
+        while yaw_diff_deg(latest_att["yaw"], target_yaw) > YAW_TOLERANCE_DEG:
+            if time.monotonic() - t_yaw_start > YAW_SETTLE_TIMEOUT_S:
+                print(f"  [경고] {YAW_SETTLE_TIMEOUT_S:.0f}초 내에 목표 yaw 미도달 "
+                      f"(현재 {latest_att['yaw']:.1f}도) - 그냥 진행")
+                break
+            await asyncio.sleep(0.1)
+        print(f"  -> yaw {latest_att['yaw']:.1f}도로 안정화")
 
-        next_log = time.monotonic()
-        for i in range(n_steps):
-            t = i * LOG_INTERVAL_S
-            true_vx, true_vy = wind_at(episode, t)
+        # yaw별로 독립적이되 재현 가능하게 시드 오프셋
+        episodes = sample_gust_episodes(N_PER_YAW, RANDOM_SEED + yaw_idx)
 
-            if i % updates_per_log == 0:
-                await set_wind(true_vx, true_vy)
+        for episode in episodes:
+            vx0, vy0 = wind_at(episode, 0.0)
+            await set_wind(vx0, vy0)
+            await asyncio.sleep(WIND_SETTLE_S)
 
-            north, east, down = latest_pv["north"], latest_pv["east"], latest_pv["down"]
-            vn, ve, vd = latest_pv["vn"], latest_pv["ve"], latest_pv["vd"]
-            roll, pitch, yaw = latest_att["roll"], latest_att["pitch"], latest_att["yaw"]
+            next_log = time.monotonic()
+            for i in range(n_steps):
+                t = i * LOG_INTERVAL_S
+                true_vx, true_vy = wind_at(episode, t)
 
-            writer.writerow([
-                ep_idx, f"{true_vx:.3f}", f"{true_vy:.3f}", f"{t:.2f}",
-                f"{current_cmd['north']:.3f}", f"{current_cmd['east']:.3f}",
-                f"{north:.3f}", f"{east:.3f}", f"{down:.3f}",
-                f"{vn:.3f}", f"{ve:.3f}", f"{vd:.3f}",
-                f"{roll:.2f}", f"{pitch:.2f}", f"{yaw:.2f}",
-            ])
+                if i % updates_per_log == 0:
+                    await set_wind(true_vx, true_vy)
 
-            next_log += LOG_INTERVAL_S
-            sleep_time = next_log - time.monotonic()
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
-            else:
-                next_log = time.monotonic()
+                north, east, down = latest_pv["north"], latest_pv["east"], latest_pv["down"]
+                vn, ve, vd = latest_pv["vn"], latest_pv["ve"], latest_pv["vd"]
+                roll, pitch, yaw = latest_att["roll"], latest_att["pitch"], latest_att["yaw"]
 
-        speed_range = (
-            min(math.hypot(*wind_at(episode, tt / 10 * EPISODE_DURATION_S)) for tt in range(11)),
-            max(math.hypot(*wind_at(episode, tt / 10 * EPISODE_DURATION_S)) for tt in range(11)),
-        )
-        print(f"  [{ep_idx+1}/{N_EPISODES}] base=({episode['base_vx']:5.2f},{episode['base_vy']:5.2f}) "
-              f"period={episode['period']:.1f}s  풍속범위≈{speed_range[0]:.1f}~{speed_range[1]:.1f}m/s  "
-              f"roll={roll:5.1f} pitch={pitch:5.1f}")
+                writer.writerow([
+                    ep_idx, f"{true_vx:.3f}", f"{true_vy:.3f}", f"{t:.2f}",
+                    f"{current_cmd['north']:.3f}", f"{current_cmd['east']:.3f}",
+                    f"{north:.3f}", f"{east:.3f}", f"{down:.3f}",
+                    f"{vn:.3f}", f"{ve:.3f}", f"{vd:.3f}",
+                    f"{roll:.2f}", f"{pitch:.2f}", f"{yaw:.2f}",
+                ])
 
-        await asyncio.sleep(EPISODE_SETTLE_S)
+                next_log += LOG_INTERVAL_S
+                sleep_time = next_log - time.monotonic()
+                if sleep_time > 0:
+                    await asyncio.sleep(sleep_time)
+                else:
+                    next_log = time.monotonic()
+
+            speed_range = (
+                min(math.hypot(*wind_at(episode, tt / 10 * EPISODE_DURATION_S)) for tt in range(11)),
+                max(math.hypot(*wind_at(episode, tt / 10 * EPISODE_DURATION_S)) for tt in range(11)),
+            )
+            print(f"  [{ep_idx+1}/{total_episodes}] yaw={yaw:5.1f} "
+                  f"base=({episode['base_vx']:5.2f},{episode['base_vy']:5.2f}) "
+                  f"period={episode['period']:.1f}s  풍속범위≈{speed_range[0]:.1f}~{speed_range[1]:.1f}m/s  "
+                  f"roll={roll:5.1f} pitch={pitch:5.1f}")
+
+            # 밤새 무인으로 돌 수 있으므로, 중간에 죽어도 여기까지는 안전하게 남도록
+            # 에피소드마다 디스크에 flush (wind_random_sweep.py와 동일한 이유)
+            csv_file.flush()
+
+            ep_idx += 1
+            await asyncio.sleep(EPISODE_SETTLE_S)
 
     csv_file.close()
     print(f"\n데이터 수집 완료. CSV 저장됨: {csv_path}")
@@ -311,13 +368,31 @@ async def run():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n", type=int, default=N_EPISODES)
+    parser.add_argument("--n-yaw", type=int, default=N_YAW, help="yaw 그리드 개수 (0~360도를 등분)")
+    parser.add_argument("--n-per-yaw", type=int, default=N_PER_YAW, help="yaw 하나당 gust 에피소드 수")
+    parser.add_argument("--yaw-offset", type=float, default=YAW_OFFSET_DEG,
+                         help="yaw 그리드 시작점을 이만큼 밀기 - 여러 세션을 다른 offset으로 "
+                              "돌리면 합쳤을 때 더 촘촘한 그리드가 됨")
     parser.add_argument("--speed-min", type=float, default=BASE_SPEED_RANGE_MPS[0])
     parser.add_argument("--speed-max", type=float, default=BASE_SPEED_RANGE_MPS[1])
     parser.add_argument("--seed", type=int, default=RANDOM_SEED)
     args = parser.parse_args()
-    N_EPISODES = args.n
+    N_YAW = args.n_yaw
+    N_PER_YAW = args.n_per_yaw
+    YAW_OFFSET_DEG = args.yaw_offset
     BASE_SPEED_RANGE_MPS = (args.speed_min, args.speed_max)
     RANDOM_SEED = args.seed
 
-    asyncio.run(run())
+    # mavsdk_server(자식 프로세스)/grpc.aio 쪽 정리가 asyncio.run() 종료 시 멈추는 경우가
+    # 있어서(트레이스백은 찍히는데 프로세스는 안 죽음), 일반 종료 대신 os._exit()로
+    # 인터프리터/스레드 정리 과정을 건너뛰고 바로 죽임 (wind_random_sweep.py와 동일).
+    try:
+        asyncio.run(run())
+    except BaseException:
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
