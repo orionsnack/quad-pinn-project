@@ -1,7 +1,8 @@
 # 파일 사용법 요약
 
-각 파일이 뭘 하는 파일이고 어떻게 실행하는지 빠르게 찾기 위한 문서입니다. 배경/설계
-이유(왜 이렇게 만들었는지, 실험 결과)는 [README.md](README.md), 환경 구축은
+각 파일이 뭘 하는 파일이고 어떻게 실행하는지 빠르게 찾기 위한 문서입니다. 프로젝트
+개요/결과 요약은 [README.md](README.md), 배경/설계 이유(왜 이렇게 만들었는지, 실패한
+시도, 실험 결과)는 [EXPERIMENTS.md](EXPERIMENTS.md), 환경 구축·트러블슈팅은
 [setup_guide.md](setup_guide.md) 참고.
 
 **공통 전제**
@@ -20,7 +21,7 @@ PINN 학습용 데이터를 모으는 스크립트들.
 
 | 파일 | 용도 | 필요 SITL 월드 | 실행 명령 | 결과 저장 위치 |
 |---|---|---|---|---|
-| `wind_random_sweep.py` | PINN 학습용 데이터 수집 — yaw 24방향(그리드) x 방향당 무작위 바람조건(기본 10개)으로 호버링하며 라벨링. yaw도 그리드로 도는 이유는 README 12-9절/12-10절 참고 (roll/pitch가 yaw에 종속적이라 다양한 yaw로 안 모으면 모델이 특정 방향에서만 통함) | `gz_x500_windy` 필수 | `python wind_random_sweep.py` (옵션 아래 참고) | `../../logs/wind_random_TIMESTAMP.csv` |
+| `wind_random_sweep.py` | PINN 학습용 데이터 수집 — yaw 24방향(그리드) x 방향당 무작위 바람조건(기본 10개, 풍속 0~10m/s)으로 호버링하며 라벨링. yaw도 그리드로 도는 이유는 EXPERIMENTS.md 12-10절 참고 (roll/pitch가 yaw에 종속적이라 다양한 yaw로 안 모으면 모델이 특정 방향에서만 통함) | `gz_x500_windy` 필수 | `python wind_random_sweep.py` (옵션 아래 참고) | `../../logs/wind_random_TIMESTAMP.csv` |
 | `wind_gust_sweep.py` | PINN 학습용 데이터 수집 — 바람이 사인파로 계속 변하는 gust 조건. `wind_random_sweep.py`와 동일하게 yaw 그리드(기본 12방향 x 방향당 5개)로 돌며 라벨링. 수집 끝나면 `plot_session_grid.py`를 자동 호출해서 격자 PNG도 같이 생성함 | `gz_x500_windy` 필수 | `python wind_gust_sweep.py` (옵션 아래 참고) | `../../logs/wind_gust_TIMESTAMP.csv` + `../../figures/wind_gust_TIMESTAMP_.../session_*.png` |
 | `wind_yaw_generalization_test.py` | 학습 yaw 범위와 다른 방향(기본 0도)으로 회전해서 소규모(기본 8개) 검증 데이터만 모으는 스팟체크용 — `evaluate_checkpoint.py`와 세트로 사용 | `gz_x500_windy` 필수 | `python wind_yaw_generalization_test.py` (`--yaw`, `--n` 옵션) | `../../logs/wind_yawtest_{yaw}deg_TIMESTAMP.csv` |
 | `run_yaw_collection_sessions.sh` | `wind_random_sweep.py`를 여러 세션으로 나눠 반복 실행하며 세션마다 SITL을 재시작하는 bash 오케스트레이션 스크립트 — 장시간(수 시간) 데이터 수집을 단일 연속비행 대신 안전하게 나눠 돌릴 때 사용. 세션 하나 끝날 때마다 `plot_session_grid.py`를 자동 호출해서 격자 PNG를 생성하고, 전체 세션이 끝나면 `plot_combined_summary.py`로 모자이크+전체 겹침 PNG까지 자동 생성함(`--no-plot`으로 이 셋 다 끌 수 있음) | 스크립트가 직접 SITL을 껐다 켬 (미리 안 띄워도 됨) | `./run_yaw_collection_sessions.sh --sessions 4 --n-yaw 24 --n-per-yaw 10` | `../../logs/wind_random_TIMESTAMP.csv` (세션마다 별도 파일) + `../../figures/wind_random_TIMESTAMP_n{N}x{M}_td{S}/`(세션별 PNG + 모자이크 + 전체 겹침) |
@@ -61,6 +62,12 @@ tail -f ../../logs/collection_run.log
 ./run_yaw_collection_sessions.sh --sessions 15 --n-yaw 12 --n-per-yaw 15 --trial-duration 15 --no-plot
 ```
 
+**같은 명령을 실수로 두 번 실행하면 SITL/포트를 두 프로세스가 나눠 쓰면서 서로
+충돌**하니, 재시작 전엔 항상 `pgrep -af "run_yaw_collection_sessions.sh"`로 이미 떠
+있는 게 없는지 확인할 것. 세션이 원인 불명으로 계속 멈추면(연결은 되는데 GPS/홈 위치
+확인에서 안 넘어감) `parameters.bson` 오염이 1순위 의심 대상 — setup_guide.md
+트러블슈팅 표 참고.
+
 `watch_collection.sh`는 `--log`/`--logs-dir`/`--stall-min`/`--interval-s` 지원
 (기본값은 `run_yaw_collection_sessions.sh`와 같은 디렉터리에서 실행한다고 가정):
 
@@ -97,7 +104,7 @@ python wind_yaw_generalization_test.py --yaw 180 --n 10   # yaw=180도에서 10�
 |---|---|---|---|---|
 | `pinn_wind_correction_sweep.py` | 5개 바람 조건(calm~crosswind) 각각에서 보정 OFF/ON을 반복해 보정 효과의 일관성을 확인 | `gz_x500_windy` 필수 | `python pinn_wind_correction_sweep.py` | `../../logs/pinn_correction_sweep_TIMESTAMP.csv` |
 | `pinn_wind_correction_gust_sweep.py` | 위 스윕의 gust 버전 — 바람 크기가 사인파로 계속 변하는 4개 조건에서 보정 OFF/ON A/B 비교 | `gz_x500_windy` 필수 | `python pinn_wind_correction_gust_sweep.py` | `../../logs/pinn_correction_gust_sweep_TIMESTAMP.csv` |
-| `pinn_correction_param_tuning.py` | `ACCEL_GAIN`/`WIND_DEADBAND_MPS` 값을 여러 개 스윕하며 대표 조건에서 개선율과 roll/pitch 안정성을 비교 (결론: README 12-8절 참고, 현재 값 유지) | `gz_x500_windy` 필수 | `python pinn_correction_param_tuning.py` | `../../logs/pinn_correction_param_tuning_TIMESTAMP.csv` |
+| `pinn_correction_param_tuning.py` | `ACCEL_GAIN`/`WIND_DEADBAND_MPS` 값을 여러 개 스윕하며 대표 조건에서 개선율과 roll/pitch 안정성을 비교 (결론: EXPERIMENTS.md 12-8절/12-14절 참고, 현재 값 유지) | `gz_x500_windy` 필수 | `python pinn_correction_param_tuning.py` | `../../logs/pinn_correction_param_tuning_TIMESTAMP.csv` |
 
 이 셋은 `offline_training/wind_estimator.pt`를 `Path(__file__).parent.parent.parent /
 "offline_training"`로 찾아서 자동 로드함 - 배포용 모델을 갱신했으면(아래

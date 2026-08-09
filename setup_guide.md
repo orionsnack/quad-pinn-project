@@ -209,9 +209,10 @@ cd ~/MyProjects/quad-pinn-project/sim_scripts
 > `offboard_velocity_test.py`, `yaw_rate_sweep_test.py`, `wind_disturbance_baseline.py`,
 > `wind_sweep_baseline.py`, `pinn_correction_interface_test.py`,
 > `pinn_wind_correction_test.py`)은 목적을 다 마치고(버그 재현/배관 검증/물리 검증 등,
-> README 8절·10절 참고) 제거함 - 필요하면 git 이력에서 복원 가능.
+> USAGE.md·아래 8절 참고) 제거함 - 필요하면 git 이력에서 복원 가능.
 >
-> `runtime/`(Jetson 실시간 파이프라인)은 아직 폴더도 안 만든 상태 - README "다음 단계" 참고.
+> `runtime/`(Jetson 실시간 파이프라인)은 아직 폴더도 안 만든 상태 - EXPERIMENTS.md
+> "다음 단계" 참고.
 
 ### 7-1. PINN 학습/추론용 패키지 (conda 환경 두 개를 씀)
 
@@ -246,3 +247,19 @@ cd ~/MyProjects/quad-pinn-project/sim_scripts
 > 두 yml 파일 다 conda 환경 자체(파이썬 버전 + PyPI 패키지)만 재현함. PX4 SITL,
 > Gazebo, QGroundControl 같은 시스템 레벨 설치는 위 1~6절을 그대로 따라야 함 —
 > yml로 대신할 수 없는 부분.
+
+## 8. 트러블슈팅 모음
+
+| 증상 | 원인/해결 |
+|---|---|
+| `ninja: error: unknown target 'list_vmd_make_targets'` | 첫 빌드 전 타겟 조회 명령을 실행해서 발생. `make distclean` 후 재시도하거나 무시하고 바로 빌드 |
+| QGC가 "Disconnected"로 안 붙음 | WSL2와 Windows 네트워크 분리 문제. `.wslconfig`에 `networkingMode=mirrored` 설정 후 `wsl --shutdown` |
+| MAVSDK `udp://` deprecated 경고 | `udpin://` 또는 `udpout://`로 명시 (`udpin://0.0.0.0:14540` 형태 권장) |
+| yaw 텔레메트리 값이 실시간 반영 안 됨(계속 같은 값) | `anext()`를 필요할 때만 호출하는 방식의 스트림 적체 문제. 백그라운드 태스크로 계속 소비하며 최신값만 저장하는 방식으로 변경 |
+| 같은 조건인데 A/B 테스트 결과가 이전 실행과 크게 다름(특히 calm 베이스라인이 갑자기 커짐) | EXPERIMENTS.md 12-8절에서 **단 1회** 관측됨(SITL 65분 연속 실행 후). "장시간 실행이 원인"이라는 건 검증 안 된 가설이지 확립된 규칙이 아님 — 재현 실험은 안 해봤음. 다만 이상하게 튀는 결과가 나오면 SITL을 재시작해서 재현되는지 확인해볼 가치는 있음 |
+| `make px4_sitl` 재구성 중 `kconfiglib is not installed` 에러, 심하면 `build/px4_sitl_default` 폴더 자체가 사라짐 | CMake가 Python3를 찾을 때 PATH상 `px4sim` conda 환경의 python을 잡는 경우가 있는데, 거기엔 PX4 빌드용 패키지(`kconfiglib` 등)가 없어서 재구성이 실패하며 빌드 폴더를 정리해버림. `environment-px4sim.yml`에 `PX4-Autopilot/Tools/setup/requirements.txt` 전체를 포함시켜 재발 방지함 (`conda env update -f environment-px4sim.yml`로 기존 환경에도 추가 가능) |
+| `HEADLESS=1 make px4_sitl ...`를 백그라운드로 오래 돌리면 출력 파일이 수 GB까지 불어남 | PX4의 `pxh>` 콘솔이 진짜 터미널이 아닌 파이프로 연결되면 프롬프트를 계속 지우고 다시 그리는(ANSI escape) 동작을 무한 반복하는 것뿐 — SITL 자체는 정상 동작. 출력을 `> /dev/null 2>&1`로 버리고 백그라운드로 띄우면 문제없음 |
+| `run_yaw_collection_sessions.sh` 세션이 원인 불명으로 계속 멈춤(연결은 되는데 GPS/홈 위치 확인에서 안 넘어감) | `~/MyProjects/PX4-Autopilot/build/px4_sitl_default/rootfs/parameters.bson`(자기장 캘리브레이션 등)이 오염됐을 가능성이 1순위 의심 대상 — 지우면(또는 이름 바꿔 백업하면) PX4가 기본값으로 새로 만듦. 세션 사이 `pkill -9`로 강제종료를 반복하는 구조라 이 파일이 가끔 깨지는 것으로 추정됨 (2026-08-08 밤 실제로 이걸로 세션 7이 계속 멈췄었음) |
+| `run_yaw_collection_sessions.sh`/`wind_*_sweep.py` 등 SITL을 직접 껐다 켜는 스크립트를 실수로 두 번 동시 실행 | SITL/포트를 두 프로세스가 나눠 쓰면서 서로 충돌함. 재시작 전엔 항상 `pgrep -af "run_yaw_collection_sessions.sh"`(또는 해당 스크립트 이름)로 이미 떠 있는 게 없는지 확인할 것 |
+| MAVSDK 스크립트가 예외를 던지고 트레이스백까지 찍혔는데 프로세스가 안 죽고 계속 살아있음(`ps`로 확인됨) | `asyncio.run()` 내부에서 mavsdk_server/grpc 채널 정리가 멈춰서 인터프리터 종료 자체가 안 되는 경우가 있음. 데이터 수집 스크립트들(`wind_random_sweep.py`, `wind_gust_sweep.py`)은 `__main__`에서 `os._exit()`로 강제 종료하도록 이미 고쳐놨지만, `sim_scripts/correction_experiments/`의 스크립트들은 아직 이 처리가 없음 — 오래 걸리는 실험은 항상 `timeout -k 15 <Ns> python ...`처럼 OS 레벨 타임아웃으로 감싸서 실행할 것 |
+| 이렇게 강제 종료된 뒤 다음 실행에서 `arm(): COMMAND_DENIED`로 arm이 거부됨 | 죽은 MAVSDK 클라이언트가 남긴 `mavsdk_server` 좀비 프로세스가 포트(기본 50051)를 계속 물고 있어서 다음 연결이 꼬이는 것으로 보임. `pgrep -af "px4|gz sim|mavsdk_server"`로 남은 프로세스를 exact PID로 정리하고 SITL을 완전히 재시작하면 해결됨 |

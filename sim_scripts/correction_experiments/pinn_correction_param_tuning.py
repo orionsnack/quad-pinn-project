@@ -2,7 +2,7 @@
 PINN 가속도 피드포워드 보정의 두 하이퍼파라미터(`ACCEL_GAIN`, `WIND_DEADBAND_MPS`)를
 체계적으로 스윕하는 스크립트. 지금까지 두 값 다 손으로 정한 값(0.15 / 1.0)이었고,
 gust A/B 검증(pinn_wind_correction_gust_sweep.py)에서 약한 gust(light_gust)만
-deadband로 못 걸러진 잡음 때문에 손해를 봤음 (README.md 12-7절).
+deadband로 못 걸러진 잡음 때문에 손해를 봤음 (EXPERIMENTS.md 12-7절).
 
 모든 조건 x 모든 파라미터 조합을 다 돌리면 시간이 너무 오래 걸리므로, 각 파라미터가
 가장 민감하게 반응할 대표 조건만 골라서 one-factor-at-a-time 방식으로 스윕:
