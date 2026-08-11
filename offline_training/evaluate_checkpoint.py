@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from wind_pinn_model import WindPINN
+from wind_pinn_model import WindPINN, physics_residual_rotation
 from train_wind_estimator import build_windows
 
 
@@ -49,21 +49,29 @@ def main():
     print(f"  행 수: {len(df)}, 조건 수: {df['condition_idx'].nunique()}, "
           f"yaw 범위: {df['yaw_deg'].min():.1f}~{df['yaw_deg'].max():.1f}도")
 
-    X, y, acc, vdrone, cond = build_windows(df)
+    X, y, acc, vdrone, omega_dot, actuator, cond = build_windows(df)
     print(f"  윈도우 샘플 수: {len(X)}")
 
     Xn = (torch.from_numpy(X) - X_mean) / X_std
     with torch.no_grad():
         pred = model(Xn)
-    err = (pred.numpy() - y)
+    wind_pred, tau_dist_pred = pred[:, :2], pred[:, 2:5]
+    err = (wind_pred.numpy() - y)
     speed_true = np.linalg.norm(y, axis=1)
-    speed_pred = np.linalg.norm(pred.numpy(), axis=1)
+    speed_pred = np.linalg.norm(wind_pred.numpy(), axis=1)
+
+    with torch.no_grad():
+        omega_dot_pred = physics_residual_rotation(tau_dist_pred, torch.from_numpy(actuator))
+    rot_residual = (omega_dot_pred - torch.from_numpy(omega_dot)).abs().mean().item()
+    tau_dist_norm = tau_dist_pred.norm(dim=1).mean().item()
 
     print(f"\n=== 평가 결과 ===")
     print(f"  wind_vx MAE = {np.abs(err[:, 0]).mean():.3f} m/s")
     print(f"  wind_vy MAE = {np.abs(err[:, 1]).mean():.3f} m/s")
     print(f"  풍속(speed) MAE = {np.abs(speed_true - speed_pred).mean():.3f} m/s "
           f"(평균 실제 풍속={speed_true.mean():.2f} m/s)")
+    print(f"  [회전] omega_dot 물리잔차 MAE = {rot_residual:.4f} rad/s^2")
+    print(f"  [회전] tau_disturbance 평균 크기 = {tau_dist_norm:.4f} N*m")
 
 
 if __name__ == "__main__":

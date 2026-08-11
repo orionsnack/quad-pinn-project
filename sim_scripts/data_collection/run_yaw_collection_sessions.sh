@@ -107,6 +107,18 @@ restart_sitl() {
     pkill -9 -f "make px4_sitl" 2>/dev/null
     pkill -9 -f "mavsdk_server" 2>/dev/null
     pkill -9 -f "wind_random_sweep.py" 2>/dev/null
+    # pkill -f 패턴 매칭이 이 프로세스는 가끔 못 죽이는 걸 실제로 겪음(2026-08-11) ->
+    # 남은 게 있으면 정확한 PID로 한 번 더 확인 후 직접 kill
+    local leftover
+    leftover=$(pgrep -f "px4_sitl_default/bin/px4|gz sim|mavsdk_server")
+    if [[ -n "$leftover" ]]; then
+        echo "  [SITL] pkill로 안 죽은 프로세스 발견, PID로 직접 정리: $leftover"
+        echo "$leftover" | xargs -r kill -9
+    fi
+    # PX4 인스턴스 락/소켓이 남으면 다음 인스턴스가 "already running"으로 오작동하며
+    # GPS/EKF2가 영영 준비 안 되는 문제를 실제로 겪음(2026-08-11, ~1시간 삽질) -
+    # kill -9로 죽이면 정상 종료 핸들러가 안 돌아서 이 파일들이 안 지워지고 남는 게 원인
+    rm -f /tmp/px4_lock-0 /tmp/px4-sock-0
     sleep 3
 
     echo "  [SITL] 재시작 중..."

@@ -177,6 +177,34 @@ async def _preflight(drone):
     while latest_att["roll"] is None:
         await asyncio.sleep(0.05)
 
+    # 2026-08-11 추가: 회전 토크 물리손실에 필요한 각속도/모터명령 로깅
+    # (wind_random_sweep.py와 동일, offline_training/wind_pinn_model.py 참고)
+    latest_gyro = {"wx": None, "wy": None, "wz": None}
+
+    async def gyro_monitor():
+        async for av in drone.telemetry.attitude_angular_velocity_body():
+            latest_gyro["wx"] = av.roll_rad_s
+            latest_gyro["wy"] = av.pitch_rad_s
+            latest_gyro["wz"] = av.yaw_rad_s
+
+    gyro_task = asyncio.create_task(gyro_monitor())
+    while latest_gyro["wx"] is None:
+        await asyncio.sleep(0.05)
+
+    latest_actuator = {"u": None}
+
+    # actuator_output_status는 기본 스트림 rate가 0이라 명시적으로 요청해야 값이 옴
+    # (wind_random_sweep.py와 동일한 이유로 실제로 겪은 문제 - 90초 타임아웃까지 멈췄음)
+    await drone.telemetry.set_rate_actuator_output_status(20.0)
+
+    async def actuator_monitor():
+        async for status in drone.telemetry.actuator_output_status():
+            latest_actuator["u"] = list(status.actuator[:4])
+
+    actuator_task = asyncio.create_task(actuator_monitor())
+    while latest_actuator["u"] is None:
+        await asyncio.sleep(0.05)
+
     # --- Offboard 송신 전담 태스크 (검증된 패턴) ---
     current_cmd = {"north": 0.0, "east": 0.0, "down": 0.0, "yaw": 0.0}
     send_gaps = []
@@ -218,15 +246,16 @@ async def _preflight(drone):
     await drone.offboard.start()
 
     sender_task = asyncio.create_task(offboard_sender())
-    return latest_pv, latest_att, current_cmd, send_gaps, pv_task, att_task, sender_task
+    return (latest_pv, latest_att, latest_gyro, latest_actuator, current_cmd, send_gaps,
+            pv_task, att_task, gyro_task, actuator_task, sender_task)
 
 
 async def run():
     drone = System()
 
     try:
-        (latest_pv, latest_att, current_cmd, send_gaps,
-         pv_task, att_task, sender_task) = await asyncio.wait_for(
+        (latest_pv, latest_att, latest_gyro, latest_actuator, current_cmd, send_gaps,
+         pv_task, att_task, gyro_task, actuator_task, sender_task) = await asyncio.wait_for(
             _preflight(drone), timeout=PREFLIGHT_TIMEOUT_S)
     except asyncio.TimeoutError:
         raise RuntimeError(
@@ -251,6 +280,8 @@ async def run():
         "actual_north_m", "actual_east_m", "actual_down_m",
         "vn_m_s", "ve_m_s", "vd_m_s",
         "roll_deg", "pitch_deg", "yaw_deg",
+        "wx_rad_s", "wy_rad_s", "wz_rad_s",
+        "actuator0", "actuator1", "actuator2", "actuator3",
     ])
     print(f"\nCSV 로그 저장 경로: {csv_path}")
 
@@ -297,6 +328,8 @@ async def run():
                 north, east, down = latest_pv["north"], latest_pv["east"], latest_pv["down"]
                 vn, ve, vd = latest_pv["vn"], latest_pv["ve"], latest_pv["vd"]
                 roll, pitch, yaw = latest_att["roll"], latest_att["pitch"], latest_att["yaw"]
+                wx, wy, wz = latest_gyro["wx"], latest_gyro["wy"], latest_gyro["wz"]
+                u = latest_actuator["u"]
 
                 writer.writerow([
                     ep_idx, f"{true_vx:.3f}", f"{true_vy:.3f}", f"{t:.2f}",
@@ -304,6 +337,8 @@ async def run():
                     f"{north:.3f}", f"{east:.3f}", f"{down:.3f}",
                     f"{vn:.3f}", f"{ve:.3f}", f"{vd:.3f}",
                     f"{roll:.2f}", f"{pitch:.2f}", f"{yaw:.2f}",
+                    f"{wx:.4f}", f"{wy:.4f}", f"{wz:.4f}",
+                    f"{u[0]:.4f}", f"{u[1]:.4f}", f"{u[2]:.4f}", f"{u[3]:.4f}",
                 ])
 
                 next_log += LOG_INTERVAL_S
@@ -359,9 +394,10 @@ async def run():
 
     await set_wind(5.0, 2.0)  # 기본값 복원
 
-    for task in (sender_task, pv_task, att_task):
+    all_tasks = (sender_task, pv_task, att_task, gyro_task, actuator_task)
+    for task in all_tasks:
         task.cancel()
-    for task in (sender_task, pv_task, att_task):
+    for task in all_tasks:
         try:
             await task
         except asyncio.CancelledError:
