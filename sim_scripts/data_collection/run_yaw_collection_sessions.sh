@@ -32,6 +32,18 @@
 
 set -uo pipefail
 
+# 중복 실행 방지 (2026-08-14 추가): 원인 불명이지만 실제로 같은 스크립트가 여러 개
+# 동시에 떠서 SITL을 서로 뺏고 죽이며 GPS/홈 위치 확인이 영영 안 되는 문제를 반복
+# 겪음. flock은 프로세스가 어떻게 죽든(kill -9 포함) OS가 자동으로 풀어주므로
+# /tmp/px4_lock-0류 파일 기반 락보다 안전함 - 두 번째 인스턴스는 바로 종료됨.
+LOCKFILE="/tmp/run_yaw_collection_sessions.lock"
+exec 200>"$LOCKFILE"
+if ! flock -n 200; then
+    echo "[중복 실행 감지] 이미 다른 run_yaw_collection_sessions.sh 인스턴스가 실행 중입니다."
+    echo "  (락 파일: $LOCKFILE) - 중복 SITL 충돌 방지를 위해 이 인스턴스는 즉시 종료합니다."
+    exit 1
+fi
+
 PX4_DIR="$HOME/MyProjects/PX4-Autopilot"
 PROJECT_DIR="$HOME/MyProjects/quad-pinn-project"
 PX4SIM_PYTHON="$HOME/miniconda3/envs/px4sim/bin/python"
