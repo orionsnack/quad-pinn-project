@@ -136,6 +136,16 @@ restart_sitl() {
     # GPS/EKF2가 영영 준비 안 되는 문제를 실제로 겪음(2026-08-11, ~1시간 삽질) -
     # kill -9로 죽이면 정상 종료 핸들러가 안 돌아서 이 파일들이 안 지워지고 남는 게 원인
     rm -f /tmp/px4_lock-0 /tmp/px4-sock-0
+
+    # parameters.bson 예방적 리셋 (2026-08-16 추가): 이 더더링 버전은 세션마다
+    # DEBUG_VECT를 20Hz로 계속 쏘다가 kill -9로 죽는 구조라(무보정 버전엔 없던 채널),
+    # parameters.bson이 무보정 버전보다 훨씬 빨리 깨지는 걸 실제로 겪음(2세션 만에
+    # ESTIMATOR_CONST_POS_MODE 고착 재발, setup_guide.md 트러블슈팅 참고). 매번
+    # 새로 만들게 하면 리셋 비용은 거의 없고(기본값으로 곧장 GPS 잠김) 이 문제를
+    # 원천적으로 막을 수 있어서, 실패할 때만 고치지 않고 매 세션 재시작마다 미리 함.
+    # (내용이 어차피 기본 캘리브레이션값이라 백업 없이 그냥 지움 - 보존할 데이터 아님)
+    rm -f "$PX4_DIR/build/px4_sitl_default/rootfs/parameters.bson" \
+          "$PX4_DIR/build/px4_sitl_default/rootfs/parameters_backup.bson"
     sleep 3
 
     echo "  [SITL] 재시작 중..."
