@@ -31,14 +31,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "offline_training")
 from wind_pinn_model import WindPINN, FEATURES, yaw_decompose  # noqa: E402
 
 WORLD_NAME = "windy"
-WIND_CONDITIONS = [
+ALL_WIND_CONDITIONS = [
     ("calm", 0.0, 0.0),
     ("default", 5.0, 2.0),
     ("strong", 8.0, 3.0),
 ]
-TAU_FF_GAIN = 1.0  # N*m -> 정규화 토크 1차 근사(캘리브레이션 테스트에서 0.05~0.15
-                    # 범위가 안정적으로 반응하는 것만 확인, tau_dist 크기(~0.06~0.09N*m)와
-                    # 대략 맞음 - 정밀 튜닝 아님, 이후 A/B 결과 보고 조정 가능)
+# CLI: python pinn_rotation_correction_test.py [gain] [condition_label]
+# 둘 다 생략하면 기존 기본 동작(gain=1.0, 3조건 전체)과 동일.
+TAU_FF_GAIN = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
+_cond_label = sys.argv[2] if len(sys.argv) > 2 else None
+WIND_CONDITIONS = (
+    [c for c in ALL_WIND_CONDITIONS if c[0] == _cond_label] if _cond_label else ALL_WIND_CONDITIONS
+)
 MAX_TAU_FF = 0.25   # 안전 클램프 (캘리브레이션 테스트한 0.15보다 여유 있게)
 TRIAL_DURATION_S = 15.0
 CALM_SETTLE_S = 3.0
