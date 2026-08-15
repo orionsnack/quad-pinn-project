@@ -73,8 +73,11 @@ VAL_FRACTION = 0.2     # (k-fold 안 쓸 때) condition 단위로 분리
 # roll_deg/pitch_deg 원본 대신 yaw와의 곱항 4개를 씀 (yaw_decompose 참고) -
 # 정확한 결합 계수는 신경망이 배움. wx/wy/wz(각속도)는 변환 없이 그대로 추가(위 docstring
 # 참고 - body frame 벡터라 yaw 종속성 문제가 없음).
-FEATURES = ["vn_m_s", "ve_m_s", "roll_cos_yaw", "roll_sin_yaw", "pitch_cos_yaw", "pitch_sin_yaw",
-            "wx_rad_s", "wy_rad_s", "wz_rad_s"]
+FEATURES = ["vn_m_s", "ve_m_s", "roll_cos_yaw", "roll_sin_yaw", "pitch_cos_yaw", "pitch_sin_yaw"]
+# wx/wy/wz(각속도)는 회전 피드포워드 보정과 SITL A/B 테스트에서 닫힌 루프 양성
+# 피드백으로 발산하는 게 확인돼(2026-08-15, README 참고) 입력 피처에서 제외함.
+# omega_dot 학습 라벨(회전 physics_loss)은 CSV의 gyro 컬럼에서 계속 직접 계산하므로
+# (build_windows 참고) 모델 입력에서만 빠지는 것 - 회전 학습 신호 자체는 그대로 유지.
 
 # ============================================================
 # 회전(로터/모터) 물리 상수 - PX4-Autopilot의 gz_x500 실측값

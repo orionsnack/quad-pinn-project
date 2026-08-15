@@ -1,18 +1,20 @@
 """
-pinn_wind_correction_test.py(강풍 1개 조건)의 다중 조건 버전.
-여러 바람 조건(calm/light/default/strong/crosswind) 각각에 대해 "보정 OFF" ->
-"보정 ON"을 순서대로 돌려서, PINN 가속도 피드포워드 보정의 효과가 특정 조건에서만
-우연히 좋았던 게 아니라 여러 조건에서 일관되게 나타나는지 확인.
+PINN이 추정한 회전 방해토크(tau_disturbance)를 PX4 rate controller에 실제
+피드포워드로 넣었을 때 자세(roll/pitch) 흔들림이 줄어드는지 검증하는 A/B 테스트.
 
-한 번의 이륙-착륙 세션 안에서 전부 처리. 조건마다:
-  무풍 안정화 -> 바람 온셋 -> 보정 OFF로 15초 관찰 -> 무풍으로 복귀 -> 무풍 안정화
-  -> 같은 바람 다시 온셋 -> 보정 ON으로 15초 관찰
-끝나면 조건별 peak_pos_error(OFF vs ON)와 개선율을 표로 요약.
+병진 보정(pinn_wind_correction_sweep.py)과 달리 이건 위치가 아니라 자세 안정성이
+목표이므로, 위치는 그대로 offboard 위치제어로 고정해두고(병진 보정은 끈 채) roll/pitch
+피크 편차만 비교한다.
 
-실행 전 조건: WSL에서 PX4 SITL이 windy 월드로 돌고 있어야 함
-(HEADLESS=1 make px4_sitl gz_x500_windy)
+주입 경로: PX4 firmware(mc_rate_control.cpp)에 새로 추가한 MAVLink
+DEBUG_VECT("TAU_FF", x, y, z) 채널 - torque_setpoint([-1,1] 정규화)에 직접 더해짐.
+tau_disturbance는 PINN이 N*m 단위로 추정하므로, TAU_FF_GAIN으로 정규화 스케일로
+환산한다(1차 근사치, 물리적으로 정밀 캘리브레이션한 값 아님 - 0.05~0.15 정규화
+범위에서 실제 roll rate가 선형·안정적으로 반응하는 것만 확인된 상태).
+
+실행 전 조건: WSL에서 PX4 SITL이 windy 월드로 돌고 있어야 함, 그리고 firmware가
+tau_disturbance 피드포워드 패치(mc_rate_control.cpp/hpp)로 재빌드되어 있어야 함.
 """
-
 import asyncio
 import csv
 import datetime
@@ -22,26 +24,22 @@ from pathlib import Path
 
 import torch
 from mavsdk import System
-from mavsdk.offboard import (OffboardError, PositionNedYaw, VelocityNedYaw, AccelerationNed)
+from mavsdk.offboard import OffboardError, PositionNedYaw, VelocityNedYaw, AccelerationNed
+from mavsdk.mavlink_direct import MavlinkMessage
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "offline_training"))
-from wind_pinn_model import WindPINN, WINDOW, FEATURES, yaw_decompose  # noqa: E402
+from wind_pinn_model import WindPINN, FEATURES, yaw_decompose  # noqa: E402
 
-
-# ============================================================
-# 실험 파라미터
-# ============================================================
 WORLD_NAME = "windy"
 WIND_CONDITIONS = [
     ("calm", 0.0, 0.0),
-    ("light", 2.0, 1.0),
     ("default", 5.0, 2.0),
     ("strong", 8.0, 3.0),
-    ("crosswind", 0.0, 6.0),
 ]
-ACCEL_GAIN = 0.15  # 체계적 튜닝 스윕에서 0.20/deadband 조정을 시도했으나 전체 조건
-MAX_ACCEL_MPS2 = 2.0    # 기준으로는 원래 값이 더 균형 잡힌 것으로 확인됨 (12-8절 참고)
-WIND_DEADBAND_MPS = 1.0  # calm에서 추정 잡음만으로 보정이 살짝 손해보던 문제 완화용
+TAU_FF_GAIN = 1.0  # N*m -> 정규화 토크 1차 근사(캘리브레이션 테스트에서 0.05~0.15
+                    # 범위가 안정적으로 반응하는 것만 확인, tau_dist 크기(~0.06~0.09N*m)와
+                    # 대략 맞음 - 정밀 튜닝 아님, 이후 A/B 결과 보고 조정 가능)
+MAX_TAU_FF = 0.25   # 안전 클램프 (캘리브레이션 테스트한 0.15보다 여유 있게)
 TRIAL_DURATION_S = 15.0
 CALM_SETTLE_S = 3.0
 PHASE_GAP_S = 2.0
@@ -50,6 +48,8 @@ TAKEOFF_TIMEOUT_S = 15.0
 LOG_INTERVAL_S = 0.05
 SEND_RATE_HZ = 20.0
 SEND_PERIOD_S = 1.0 / SEND_RATE_HZ
+TAUFF_RATE_HZ = 20.0
+TAUFF_PERIOD_S = 1.0 / TAUFF_RATE_HZ
 
 MODEL_PATH = Path(__file__).parent.parent.parent / "offline_training" / "wind_estimator.pt"
 
@@ -63,7 +63,7 @@ async def set_wind(vx, vy, vz=0.0):
     await proc.wait()
 
 
-class WindCorrector:
+class RotationCorrector:
     def __init__(self, model_path):
         ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
         self.model = WindPINN(ckpt["window"], len(ckpt["features"]))
@@ -84,31 +84,11 @@ class WindCorrector:
         return len(self.buffer) == self.window
 
     @torch.no_grad()
-    def estimate_wind_ned(self):
+    def estimate_tau_dist(self):
         x = torch.tensor(self.buffer, dtype=torch.float32).flatten()
         xn = (x - self.X_mean) / self.X_std
-        wind_enu = self.model(xn.unsqueeze(0)).squeeze(0)
-        return wind_enu[1].item(), wind_enu[0].item()  # (north, east)
-
-
-class EmaSmoother:
-    def __init__(self, time_constant_s, dt_s):
-        self.alpha = dt_s / (time_constant_s + dt_s)
-        self.value = None
-
-    def update(self, x):
-        self.value = x if self.value is None else self.alpha * x + (1 - self.alpha) * self.value
-        return self.value
-
-
-def apply_deadband(wind_n, wind_e, deadband):
-    """speed<=deadband면 (0,0), 그 이상이면 방향 유지한 채 크기만
-    (speed-deadband)만큼으로 줄임 - 문턱값에서 뚝 끊기지 않고 연속적으로 이어짐."""
-    speed = (wind_n ** 2 + wind_e ** 2) ** 0.5
-    if speed <= deadband or speed == 0.0:
-        return 0.0, 0.0
-    scale = (speed - deadband) / speed
-    return wind_n * scale, wind_e * scale
+        pred = self.model(xn.unsqueeze(0)).squeeze(0)
+        return pred[2].item(), pred[3].item(), pred[4].item()  # tau_x, tau_y, tau_z (N*m)
 
 
 async def run():
@@ -128,25 +108,21 @@ async def run():
             break
 
     print(f"\n모델 로드: {MODEL_PATH}")
-    corrector = WindCorrector(MODEL_PATH)
+    corrector = RotationCorrector(MODEL_PATH)
     print(f"  window={corrector.window}  features={corrector.features}")
 
     await set_wind(0.0, 0.0)
 
     print("\n--- Arming ---")
     await drone.action.arm()
-    print("-> Armed")
-
     print("\n--- Takeoff ---")
     await drone.action.takeoff()
 
-    print(f"  안전 고도({SAFE_ALTITUDE_M}m) 도달 대기 중...")
     t_start = time.monotonic()
     reached_altitude = False
     async for position in drone.telemetry.position():
-        alt = position.relative_altitude_m
-        if alt >= SAFE_ALTITUDE_M:
-            print(f"  -> 안전 고도 도달 (relative_altitude={alt:.2f}m)")
+        if position.relative_altitude_m >= SAFE_ALTITUDE_M:
+            print(f"  -> 안전 고도 도달 ({position.relative_altitude_m:.2f}m)")
             reached_altitude = True
             break
         if time.monotonic() - t_start > TAKEOFF_TIMEOUT_S:
@@ -174,10 +150,10 @@ async def run():
     latest_att = {"roll": None, "pitch": None, "yaw": None}
 
     async def att_monitor():
-        async for attitude in drone.telemetry.attitude_euler():
-            latest_att["roll"] = attitude.roll_deg
-            latest_att["pitch"] = attitude.pitch_deg
-            latest_att["yaw"] = attitude.yaw_deg
+        async for a in drone.telemetry.attitude_euler():
+            latest_att["roll"] = a.roll_deg
+            latest_att["pitch"] = a.pitch_deg
+            latest_att["yaw"] = a.yaw_deg
 
     att_task = asyncio.create_task(att_monitor())
     while latest_att["roll"] is None:
@@ -197,41 +173,25 @@ async def run():
 
     nominal = {"north": latest_pv["north"], "east": latest_pv["east"],
                "down": latest_pv["down"], "yaw": latest_att["yaw"]}
-    current_cmd = {"accel_n": 0.0, "accel_e": 0.0}
-    send_gaps = []
 
     async def offboard_sender():
-        next_tick = time.monotonic()
-        last_sent = None
         while True:
             try:
                 await drone.offboard.set_position_velocity_acceleration_ned(
-                    PositionNedYaw(nominal["north"], nominal["east"],
-                                    nominal["down"], nominal["yaw"]),
+                    PositionNedYaw(nominal["north"], nominal["east"], nominal["down"], nominal["yaw"]),
                     VelocityNedYaw(0.0, 0.0, 0.0, nominal["yaw"]),
-                    AccelerationNed(current_cmd["accel_n"], current_cmd["accel_e"], 0.0),
+                    AccelerationNed(0.0, 0.0, 0.0),
                 )
             except Exception as exc:
-                print(f"  [!!! offboard_sender 예외] {type(exc).__name__}: {exc}")
-            now = time.monotonic()
-            if last_sent is not None:
-                send_gaps.append(now - last_sent)
-            last_sent = now
-            next_tick += SEND_PERIOD_S
-            sleep_time = next_tick - time.monotonic()
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
-            else:
-                next_tick = time.monotonic()
+                print(f"  [!!! offboard_sender 예외] {exc}")
+            await asyncio.sleep(SEND_PERIOD_S)
 
-    print("\n--- Offboard 진입 준비: 초기 setpoint(현재 위치 고정) 전송 ---")
+    print("\n--- Offboard 진입 준비 ---")
     await drone.offboard.set_position_velocity_acceleration_ned(
         PositionNedYaw(nominal["north"], nominal["east"], nominal["down"], nominal["yaw"]),
         VelocityNedYaw(0.0, 0.0, 0.0, nominal["yaw"]),
         AccelerationNed(0.0, 0.0, 0.0),
     )
-
-    print("\n--- Offboard 모드 시작 ---")
     try:
         await drone.offboard.start()
     except OffboardError as error:
@@ -241,61 +201,74 @@ async def run():
 
     sender_task = asyncio.create_task(offboard_sender())
 
+    current_tauff = {"x": 0.0, "y": 0.0, "z": 0.0}
+
+    async def tauff_sender():
+        while True:
+            msg = MavlinkMessage(
+                message_name="DEBUG_VECT", system_id=0, component_id=0,
+                target_system_id=0, target_component_id=0,
+                fields_json=(
+                    '{"name": "TAU_FF", "time_usec": 0, '
+                    f'"x": {current_tauff["x"]}, "y": {current_tauff["y"]}, "z": {current_tauff["z"]}}}'
+                ),
+            )
+            try:
+                await drone.mavlink_direct.send_message(msg)
+            except Exception as exc:
+                print(f"  [!!! tauff_sender 예외] {exc}")
+            await asyncio.sleep(TAUFF_PERIOD_S)
+
+    tauff_task = asyncio.create_task(tauff_sender())
+
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = f"../../logs/pinn_correction_sweep_{timestamp_str}.csv"
+    csv_path = f"../../logs/pinn_rotation_correction_{timestamp_str}.csv"
     csv_file = open(csv_path, "w", newline="")
     writer = csv.writer(csv_file)
     writer.writerow([
-        "wind_label", "phase", "t_s", "wind_est_north", "wind_est_east",
-        "accel_n_m_s2", "accel_e_m_s2",
-        "actual_north_m", "actual_east_m", "pos_error_m",
-        "roll_deg", "pitch_deg",
+        "wind_label", "phase", "t_s", "tau_x", "tau_y", "tau_z",
+        "tauff_x", "tauff_y", "tauff_z",
+        "roll_deg", "pitch_deg", "wx_rad_s", "wy_rad_s",
     ])
     print(f"\nCSV 로그 저장 경로: {csv_path}")
 
     async def run_trial(wind_label, phase_name, use_correction):
         corrector.buffer.clear()
-        smoother_n = EmaSmoother(time_constant_s=0.4, dt_s=LOG_INTERVAL_S)
-        smoother_e = EmaSmoother(time_constant_s=0.4, dt_s=LOG_INTERVAL_S)
         n_steps = int(TRIAL_DURATION_S / LOG_INTERVAL_S)
         next_log = time.monotonic()
-        peak_error = 0.0
+        peak_att_error = 0.0
 
         for i in range(n_steps):
             t = i * LOG_INTERVAL_S
-            north, east = latest_pv["north"], latest_pv["east"]
-            vn, ve = latest_pv["vn"], latest_pv["ve"]
             roll, pitch, yaw = latest_att["roll"], latest_att["pitch"], latest_att["yaw"]
+            wx, wy = latest_gyro["wx"], latest_gyro["wy"]
+            vn, ve = latest_pv["vn"], latest_pv["ve"]
 
             r_cos, r_sin, p_cos, p_sin = yaw_decompose(roll, pitch, yaw)
             feat = {"vn_m_s": vn, "ve_m_s": ve, "roll_cos_yaw": r_cos, "roll_sin_yaw": r_sin,
                     "pitch_cos_yaw": p_cos, "pitch_sin_yaw": p_sin,
-                    "wx_rad_s": latest_gyro["wx"], "wy_rad_s": latest_gyro["wy"],
-                    "wz_rad_s": latest_gyro["wz"]}
+                    "wx_rad_s": wx, "wy_rad_s": wy, "wz_rad_s": latest_gyro["wz"]}
             corrector.push_state([feat[f] for f in FEATURES])
 
-            wind_n, wind_e = 0.0, 0.0
+            tau_x = tau_y = tau_z = 0.0
             if use_correction and corrector.ready():
-                raw_n, raw_e = corrector.estimate_wind_ned()
-                wind_n = smoother_n.update(raw_n)
-                wind_e = smoother_e.update(raw_e)
-                wind_n, wind_e = apply_deadband(wind_n, wind_e, WIND_DEADBAND_MPS)
-                accel_n = max(-MAX_ACCEL_MPS2, min(MAX_ACCEL_MPS2, -ACCEL_GAIN * wind_n))
-                accel_e = max(-MAX_ACCEL_MPS2, min(MAX_ACCEL_MPS2, -ACCEL_GAIN * wind_e))
-                current_cmd["accel_n"] = accel_n
-                current_cmd["accel_e"] = accel_e
+                tau_x, tau_y, tau_z = corrector.estimate_tau_dist()
+                ff_x = max(-MAX_TAU_FF, min(MAX_TAU_FF, -TAU_FF_GAIN * tau_x))
+                ff_y = max(-MAX_TAU_FF, min(MAX_TAU_FF, -TAU_FF_GAIN * tau_y))
+                ff_z = max(-MAX_TAU_FF, min(MAX_TAU_FF, -TAU_FF_GAIN * tau_z))
+                current_tauff["x"] = ff_x
+                current_tauff["y"] = ff_y
+                current_tauff["z"] = ff_z
             else:
-                current_cmd["accel_n"] = 0.0
-                current_cmd["accel_e"] = 0.0
+                current_tauff["x"] = current_tauff["y"] = current_tauff["z"] = 0.0
 
-            pos_error = ((north - nominal["north"]) ** 2 + (east - nominal["east"]) ** 2) ** 0.5
-            peak_error = max(peak_error, pos_error)
+            att_error = (roll ** 2 + pitch ** 2) ** 0.5
+            peak_att_error = max(peak_att_error, att_error)
 
             writer.writerow([
-                wind_label, phase_name, f"{t:.2f}", f"{wind_n:.2f}", f"{wind_e:.2f}",
-                f"{current_cmd['accel_n']:.3f}", f"{current_cmd['accel_e']:.3f}",
-                f"{north:.3f}", f"{east:.3f}", f"{pos_error:.3f}",
-                f"{roll:.2f}", f"{pitch:.2f}",
+                wind_label, phase_name, f"{t:.2f}", f"{tau_x:.4f}", f"{tau_y:.4f}", f"{tau_z:.4f}",
+                f"{current_tauff['x']:.3f}", f"{current_tauff['y']:.3f}", f"{current_tauff['z']:.3f}",
+                f"{roll:.3f}", f"{pitch:.3f}", f"{wx:.4f}", f"{wy:.4f}",
             ])
 
             next_log += LOG_INTERVAL_S
@@ -305,68 +278,54 @@ async def run():
             else:
                 next_log = time.monotonic()
 
-        return peak_error
+        return peak_att_error
 
     results = []
     for wind_label, wind_vx, wind_vy in WIND_CONDITIONS:
         print(f"\n{'='*60}\n=== 바람 조건: {wind_label} (vx={wind_vx}, vy={wind_vy}) ===\n{'='*60}")
 
-        print("  -- 보정 OFF --")
+        print("  -- 회전 보정 OFF --")
         await set_wind(0.0, 0.0)
         await asyncio.sleep(CALM_SETTLE_S)
-        nominal["north"] = latest_pv["north"]
-        nominal["east"] = latest_pv["east"]
         await set_wind(wind_vx, wind_vy)
-        peak_off = await run_trial(wind_label, "correction_off", use_correction=False)
-        print(f"    peak_pos_error(OFF) = {peak_off:.3f}m")
+        peak_off = await run_trial(wind_label, "rot_off", use_correction=False)
+        print(f"    peak_attitude_error(OFF) = {peak_off:.3f}deg")
 
         await set_wind(0.0, 0.0)
-        current_cmd["accel_n"] = 0.0
-        current_cmd["accel_e"] = 0.0
+        current_tauff["x"] = current_tauff["y"] = current_tauff["z"] = 0.0
         await asyncio.sleep(PHASE_GAP_S)
 
-        print("  -- 보정 ON --")
+        print("  -- 회전 보정 ON --")
         await asyncio.sleep(CALM_SETTLE_S)
-        nominal["north"] = latest_pv["north"]
-        nominal["east"] = latest_pv["east"]
         await set_wind(wind_vx, wind_vy)
-        peak_on = await run_trial(wind_label, "correction_on", use_correction=True)
-        print(f"    peak_pos_error(ON)  = {peak_on:.3f}m")
+        peak_on = await run_trial(wind_label, "rot_on", use_correction=True)
+        print(f"    peak_attitude_error(ON)  = {peak_on:.3f}deg")
 
         improvement = (peak_off - peak_on) / peak_off * 100 if peak_off > 1e-6 else 0.0
         print(f"    개선율 = {improvement:+.1f}%")
         results.append((wind_label, wind_vx, wind_vy, peak_off, peak_on, improvement))
 
         await set_wind(0.0, 0.0)
-        current_cmd["accel_n"] = 0.0
-        current_cmd["accel_e"] = 0.0
+        current_tauff["x"] = current_tauff["y"] = current_tauff["z"] = 0.0
         await asyncio.sleep(PHASE_GAP_S)
 
     csv_file.close()
 
-    print(f"\n{'='*70}\n=== 전체 요약 ===\n{'='*70}")
+    print(f"\n{'='*70}\n=== 전체 요약 (자세 피크 편차, deg) ===\n{'='*70}")
     print(f"{'조건':10s} {'풍속(m/s)':>10s} {'OFF peak':>10s} {'ON peak':>10s} {'개선율':>8s}")
     for label, vx, vy, off, on, imp in results:
-        speed = (vx**2 + vy**2) ** 0.5
+        speed = (vx ** 2 + vy ** 2) ** 0.5
         print(f"{label:10s} {speed:10.2f} {off:10.3f} {on:10.3f} {imp:+7.1f}%")
 
     n_improved = sum(1 for r in results if r[5] > 0)
     print(f"\n개선된 조건: {n_improved}/{len(results)}")
     print(f"CSV 저장됨: {csv_path}")
 
-    if send_gaps:
-        n_over = sum(1 for g in send_gaps if g > 1.5 * SEND_PERIOD_S)
-        print(
-            f"\n[송신 간격 통계] 목표={SEND_PERIOD_S*1000:.0f}ms  "
-            f"평균={sum(send_gaps)/len(send_gaps)*1000:.1f}ms  "
-            f"최대={max(send_gaps)*1000:.1f}ms  임계치 초과={n_over}/{len(send_gaps)}"
-        )
+    await set_wind(0.0, 0.0)
 
-    await set_wind(5.0, 2.0)
-
-    for task in (sender_task, pv_task, att_task, gyro_task):
+    for task in (sender_task, tauff_task, pv_task, att_task, gyro_task):
         task.cancel()
-    for task in (sender_task, pv_task, att_task, gyro_task):
+    for task in (sender_task, tauff_task, pv_task, att_task, gyro_task):
         try:
             await task
         except asyncio.CancelledError:
@@ -386,7 +345,7 @@ async def run():
             print("-> 착륙 완료 및 디스암 확인")
             break
 
-    print("\nPINN 보정 스윕 테스트 완료.")
+    print("\nPINN 회전 보정 테스트 완료.")
 
 
 if __name__ == "__main__":

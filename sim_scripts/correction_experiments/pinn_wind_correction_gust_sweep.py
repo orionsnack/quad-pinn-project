@@ -207,6 +207,18 @@ async def run():
     while latest_att["roll"] is None:
         await asyncio.sleep(0.05)
 
+    latest_gyro = {"wx": None, "wy": None, "wz": None}
+
+    async def gyro_monitor():
+        async for av in drone.telemetry.attitude_angular_velocity_body():
+            latest_gyro["wx"] = av.roll_rad_s
+            latest_gyro["wy"] = av.pitch_rad_s
+            latest_gyro["wz"] = av.yaw_rad_s
+
+    gyro_task = asyncio.create_task(gyro_monitor())
+    while latest_gyro["wx"] is None:
+        await asyncio.sleep(0.05)
+
     nominal = {"north": latest_pv["north"], "east": latest_pv["east"],
                "down": latest_pv["down"], "yaw": latest_att["yaw"]}
     current_cmd = {"accel_n": 0.0, "accel_e": 0.0}
@@ -288,7 +300,9 @@ async def run():
 
             r_cos, r_sin, p_cos, p_sin = yaw_decompose(roll, pitch, yaw)
             feat = {"vn_m_s": vn, "ve_m_s": ve, "roll_cos_yaw": r_cos, "roll_sin_yaw": r_sin,
-                    "pitch_cos_yaw": p_cos, "pitch_sin_yaw": p_sin}
+                    "pitch_cos_yaw": p_cos, "pitch_sin_yaw": p_sin,
+                    "wx_rad_s": latest_gyro["wx"], "wy_rad_s": latest_gyro["wy"],
+                    "wz_rad_s": latest_gyro["wz"]}
             corrector.push_state([feat[f] for f in FEATURES])
 
             wind_n, wind_e = 0.0, 0.0
@@ -383,9 +397,9 @@ async def run():
 
     await set_wind(5.0, 2.0)
 
-    for task in (sender_task, pv_task, att_task):
+    for task in (sender_task, pv_task, att_task, gyro_task):
         task.cancel()
-    for task in (sender_task, pv_task, att_task):
+    for task in (sender_task, pv_task, att_task, gyro_task):
         try:
             await task
         except asyncio.CancelledError:
