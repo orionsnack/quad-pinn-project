@@ -37,8 +37,10 @@ ALL_WIND_CONDITIONS = [
     ("strong", 8.0, 3.0),
 ]
 # CLI: python pinn_rotation_correction_test.py [gain] [condition_label]
-# 둘 다 생략하면 기존 기본 동작(gain=1.0, 3조건 전체)과 동일.
-TAU_FF_GAIN = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
+# gain 기본값 0.2 (2026-08-16 스윕으로 확정 - EXPERIMENTS.md 12-17절): 1.0에서는
+# 3조건 다 손해/중립이었는데, 0.2로 낮추니 default +2.8%/+3.8%(재현됨), strong
+# +3.2%로 첫 순이익 확인. calm은 -4.5%지만 절대오차 0.036도로 노이즈 수준.
+TAU_FF_GAIN = float(sys.argv[1]) if len(sys.argv) > 1 else 0.2
 _cond_label = sys.argv[2] if len(sys.argv) > 2 else None
 WIND_CONDITIONS = (
     [c for c in ALL_WIND_CONDITIONS if c[0] == _cond_label] if _cond_label else ALL_WIND_CONDITIONS
