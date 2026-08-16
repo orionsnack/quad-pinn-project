@@ -31,10 +31,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "offline_training")
 from wind_pinn_model import WindPINN, FEATURES, yaw_decompose  # noqa: E402
 
 WORLD_NAME = "windy"
+# 병진 A/B(pinn_wind_correction_sweep.py)와 동일한 표준 5조건 - 회전 쪽 초기
+# 검증(12-16/12-17절)은 3조건(calm/default/strong)만 썼으므로, gain=0.2가 더
+# 넓은 조건에서도 유효한지 보려면 light/crosswind까지 포함해야 함.
 ALL_WIND_CONDITIONS = [
     ("calm", 0.0, 0.0),
+    ("light", 2.0, 1.0),
     ("default", 5.0, 2.0),
     ("strong", 8.0, 3.0),
+    ("crosswind", 0.0, 6.0),
 ]
 # CLI: python pinn_rotation_correction_test.py [gain] [condition_label]
 # gain 기본값 0.2 (2026-08-16 스윕으로 확정 - EXPERIMENTS.md 12-17절): 1.0에서는
