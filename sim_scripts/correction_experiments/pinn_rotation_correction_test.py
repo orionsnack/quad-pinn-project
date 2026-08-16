@@ -41,15 +41,27 @@ ALL_WIND_CONDITIONS = [
     ("strong", 8.0, 3.0),
     ("crosswind", 0.0, 6.0),
 ]
-# CLI: python pinn_rotation_correction_test.py [gain] [condition_label]
+# CLI: python pinn_rotation_correction_test.py [gain] [condition_label] [target_yaw_deg]
 # gain 기본값 0.2 (2026-08-16 스윕으로 확정 - EXPERIMENTS.md 12-17절): 1.0에서는
 # 3조건 다 손해/중립이었는데, 0.2로 낮추니 default +2.8%/+3.8%(재현됨), strong
 # +3.2%로 첫 순이익 확인. calm은 -4.5%지만 절대오차 0.036도로 노이즈 수준.
+# target_yaw_deg 생략 시 SITL 스폰 시 yaw 그대로 사용 (지금까지 전부 이렇게
+# 테스트함) - 각속도(wx/wy/wz)는 body frame이라 이론상 yaw 종속성이 없어야
+# 하지만(wind_pinn_model.py 참고), 병진 쪽에서 실제로 yaw 의존성 버그가 있었던
+# 전례(12-10절)가 있어 다른 yaw에서도 gain=0.2가 유효한지 확인할 가치가 있음.
 TAU_FF_GAIN = float(sys.argv[1]) if len(sys.argv) > 1 else 0.2
 _cond_label = sys.argv[2] if len(sys.argv) > 2 else None
+TARGET_YAW_DEG = float(sys.argv[3]) if len(sys.argv) > 3 else None
 WIND_CONDITIONS = (
     [c for c in ALL_WIND_CONDITIONS if c[0] == _cond_label] if _cond_label else ALL_WIND_CONDITIONS
 )
+YAW_TOLERANCE_DEG = 3.0
+YAW_SETTLE_TIMEOUT_S = 10.0
+
+
+def yaw_diff_deg(a, b):
+    d = (a - b + 180) % 360 - 180
+    return abs(d)
 MAX_TAU_FF = 0.25   # 안전 클램프 (캘리브레이션 테스트한 0.15보다 여유 있게)
 TRIAL_DURATION_S = 15.0
 CALM_SETTLE_S = 3.0
@@ -211,6 +223,17 @@ async def run():
         return
 
     sender_task = asyncio.create_task(offboard_sender())
+
+    if TARGET_YAW_DEG is not None:
+        print(f"\n--- 목표 yaw {TARGET_YAW_DEG:.0f}도로 회전 중 (현재 {latest_att['yaw']:.1f}도) ---")
+        nominal["yaw"] = TARGET_YAW_DEG
+        t_yaw_start = time.monotonic()
+        while yaw_diff_deg(latest_att["yaw"], TARGET_YAW_DEG) > YAW_TOLERANCE_DEG:
+            if time.monotonic() - t_yaw_start > YAW_SETTLE_TIMEOUT_S:
+                print(f"  [경고] {YAW_SETTLE_TIMEOUT_S:.0f}초 내에 목표 yaw 미도달 - 그냥 진행")
+                break
+            await asyncio.sleep(0.1)
+        print(f"  -> yaw {latest_att['yaw']:.1f}도로 안정화")
 
     current_tauff = {"x": 0.0, "y": 0.0, "z": 0.0}
 
