@@ -42,6 +42,22 @@ WIND_CONDITIONS = [
 ACCEL_GAIN = 0.15  # 체계적 튜닝 스윕에서 0.20/deadband 조정을 시도했으나 전체 조건
 MAX_ACCEL_MPS2 = 2.0    # 기준으로는 원래 값이 더 균형 잡힌 것으로 확인됨 (12-8절 참고)
 WIND_DEADBAND_MPS = 1.0  # calm에서 추정 잡음만으로 보정이 살짝 손해보던 문제 완화용
+
+# 적응형 게인 (2026-08-17 추가, EXPERIMENTS.md 12-8/12-20절): 12-8절에서 단일
+# ACCEL_GAIN 상수로는 "강풍 개선하려고 올리면 무풍/약풍이 나빠지는" 트레이드오프가
+# 확인됨 - 풍속에 비례해 게인을 선형으로 키우면 양쪽을 동시에 잡을 수 있는지 검증.
+# CLI --adaptive로 켜기 전엔 기존처럼 ACCEL_GAIN 고정값 그대로 사용(기본 동작 불변).
+USE_ADAPTIVE_GAIN = "--adaptive" in sys.argv
+ACCEL_GAIN_MIN = 0.10   # deadband 통과 직후(약한 신호)엔 낮게 - 추정 잡음 과대반응 억제
+ACCEL_GAIN_MAX = 0.25   # 강풍에선 높게 - 12-8절 스윕 범위(0.05~0.30) 상단 근처
+ADAPTIVE_GAIN_SPEED_LOW = WIND_DEADBAND_MPS   # 이 풍속 이하는 ACCEL_GAIN_MIN
+ADAPTIVE_GAIN_SPEED_HIGH = 8.0                # strong 조건 풍속 - 이 이상은 ACCEL_GAIN_MAX
+
+
+def adaptive_gain(speed_est):
+    t = (speed_est - ADAPTIVE_GAIN_SPEED_LOW) / (ADAPTIVE_GAIN_SPEED_HIGH - ADAPTIVE_GAIN_SPEED_LOW)
+    t = max(0.0, min(1.0, t))
+    return ACCEL_GAIN_MIN + (ACCEL_GAIN_MAX - ACCEL_GAIN_MIN) * t
 TRIAL_DURATION_S = 15.0
 CALM_SETTLE_S = 3.0
 PHASE_GAP_S = 2.0
@@ -130,6 +146,11 @@ async def run():
     print(f"\n모델 로드: {MODEL_PATH}")
     corrector = WindCorrector(MODEL_PATH)
     print(f"  window={corrector.window}  features={corrector.features}")
+    if USE_ADAPTIVE_GAIN:
+        print(f"  게인 모드: 적응형 (min={ACCEL_GAIN_MIN}, max={ACCEL_GAIN_MAX}, "
+              f"{ADAPTIVE_GAIN_SPEED_LOW}~{ADAPTIVE_GAIN_SPEED_HIGH}m/s 구간 선형)")
+    else:
+        print(f"  게인 모드: 고정 (ACCEL_GAIN={ACCEL_GAIN})")
 
     await set_wind(0.0, 0.0)
 
@@ -257,6 +278,10 @@ async def run():
         corrector.buffer.clear()
         smoother_n = EmaSmoother(time_constant_s=0.4, dt_s=LOG_INTERVAL_S)
         smoother_e = EmaSmoother(time_constant_s=0.4, dt_s=LOG_INTERVAL_S)
+        # 적응형 게인 자체도 별도로 스무딩(1.0초, 풍속 스무더보다 느림) - 게인을
+        # 풍속 추정치의 함수로 만들면 추정 잡음이 게인 변동을 통해 2차로 명령에
+        # 전달되어 오히려 더 떨리는 문제를 실측으로 확인함(EXPERIMENTS.md 12-20절).
+        gain_smoother = EmaSmoother(time_constant_s=1.0, dt_s=LOG_INTERVAL_S)
         n_steps = int(TRIAL_DURATION_S / LOG_INTERVAL_S)
         next_log = time.monotonic()
         peak_error = 0.0
@@ -280,8 +305,13 @@ async def run():
                 wind_n = smoother_n.update(raw_n)
                 wind_e = smoother_e.update(raw_e)
                 wind_n, wind_e = apply_deadband(wind_n, wind_e, WIND_DEADBAND_MPS)
-                accel_n = max(-MAX_ACCEL_MPS2, min(MAX_ACCEL_MPS2, -ACCEL_GAIN * wind_n))
-                accel_e = max(-MAX_ACCEL_MPS2, min(MAX_ACCEL_MPS2, -ACCEL_GAIN * wind_e))
+                if USE_ADAPTIVE_GAIN:
+                    raw_gain = adaptive_gain((wind_n ** 2 + wind_e ** 2) ** 0.5)
+                    gain = gain_smoother.update(raw_gain)
+                else:
+                    gain = ACCEL_GAIN
+                accel_n = max(-MAX_ACCEL_MPS2, min(MAX_ACCEL_MPS2, -gain * wind_n))
+                accel_e = max(-MAX_ACCEL_MPS2, min(MAX_ACCEL_MPS2, -gain * wind_e))
                 current_cmd["accel_n"] = accel_n
                 current_cmd["accel_e"] = accel_e
             else:
