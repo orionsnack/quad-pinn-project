@@ -142,6 +142,12 @@ def train_one_split(X, y, acc, vdrone, omega_dot, actuator, train_mask, val_mask
     best_state = None
     best_epoch = -1
     n_train = len(Xtr)
+    # early stopping: 고정 EPOCHS 값을 추측하는 대신 실제 수렴 시점에 맞춰 멈춤.
+    # 배포된 체크포인트의 best_epoch=187(전체 더더링+gust 데이터 기준)이었던 걸
+    # 뒤늦게 확인함 - 데이터셋/sigma마다 수렴 시점이 크게 다를 수 있어 고정값
+    # 추측(예: EPOCHS=80)은 위험함. PATIENCE만큼 개선 없으면 중단 (2026-08-20).
+    PATIENCE = 50
+    epochs_since_improve = 0
 
     for epoch in range(1, EPOCHS + 1):
         model.train()
@@ -179,11 +185,20 @@ def train_one_split(X, y, acc, vdrone, omega_dot, actuator, train_mask, val_mask
             best_val_mae = val_mae
             best_epoch = epoch
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            epochs_since_improve = 0
+        else:
+            epochs_since_improve += 1
 
         if verbose and (epoch % 5 == 0 or epoch == 1):
             print(f"  epoch {epoch:4d}  train_data_loss={data_loss_avg:.4f}  "
                   f"physics_loss={physics_loss_avg:.4f}  rot_loss={rot_loss_avg:.4f}  "
                   f"val_MAE={val_mae:.3f}m/s  k={model.k.item():.4f}", flush=True)
+
+        if epochs_since_improve >= PATIENCE:
+            if verbose:
+                print(f"  -> {PATIENCE}epoch 동안 개선 없어 조기 종료 (epoch {epoch}, "
+                      f"best_epoch={best_epoch})", flush=True)
+            break
 
     model.load_state_dict(best_state)
     model.eval()
@@ -249,6 +264,7 @@ def run_kfold(X, y, acc, vdrone, omega_dot, actuator, cond, k, k_noise_sigma=0.0
 
 
 def main():
+    global EPOCHS
     parser = argparse.ArgumentParser()
     parser.add_argument("csvs", nargs="+", help="wind_random_*.csv / wind_gust_*.csv")
     parser.add_argument("--kfold", type=int, default=0,
@@ -257,7 +273,12 @@ def main():
                          help="RAMP-Net 파라메트릭 불확실성 주입 강도 (0=끔, 기존 동작과 동일). "
                               "물리손실 계산에 쓰는 항력계수 k에 상대 노이즈 N(0,sigma)를 섞음 "
                               "(EXPERIMENTS.md 12-15/12-22절)")
+    parser.add_argument("--epochs", type=int, default=EPOCHS,
+                         help="최대 epoch 수 (기본 400은 회전 결합 데이터에서 과함 - "
+                              "12-16절 참고, best_epoch가 보통 30 이전에 나옴). "
+                              "체크포인트는 항상 best-val-mae 기준이라 줄여도 품질 손해 없음")
     args = parser.parse_args()
+    EPOCHS = args.epochs
 
     dfs = [pd.read_csv(p) for p in args.csvs]
     # 여러 CSV를 합칠 때 condition_idx가 겹치지 않도록 오프셋
