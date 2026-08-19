@@ -17,6 +17,8 @@
 #   ./repeat_sweep.sh --script pinn_wind_correction_sweep.py --repeats 5
 #   ./repeat_sweep.sh --script pinn_wind_correction_gust_sweep.py --repeats 5
 #   ./repeat_sweep.sh --script pinn_rotation_correction_test.py --repeats 5 --timeout 600
+#   # -- 뒤의 인자는 그대로 대상 스크립트에 전달됨(예: settle-time 실험):
+#   ./repeat_sweep.sh --script pinn_wind_correction_sweep.py --repeats 5 -- --calm-settle-s 5 --phase-gap-s 4
 
 set -uo pipefail
 
@@ -29,6 +31,7 @@ TARGET_SCRIPT=""
 REPEATS=5
 BOOT_WAIT_S=15
 TIMEOUT_S=600
+EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -36,6 +39,7 @@ while [[ $# -gt 0 ]]; do
         --repeats) REPEATS="$2"; shift 2 ;;
         --timeout) TIMEOUT_S="$2"; shift 2 ;;
         --boot-wait) BOOT_WAIT_S="$2"; shift 2 ;;
+        --) shift; EXTRA_ARGS=("$@"); break ;;
         *) echo "알 수 없는 옵션: $1"; exit 1 ;;
     esac
 done
@@ -118,7 +122,7 @@ for i in $(seq 1 "$REPEATS"); do
     restart_sitl
 
     before=$(ls -t "$PROJECT_DIR"/logs/*.csv 2>/dev/null | head -1)
-    if (cd "$SCRIPT_DIR" && timeout -k 15 "${TIMEOUT_S}s" "$PX4SIM_PYTHON" -u "$TARGET_SCRIPT"); then
+    if (cd "$SCRIPT_DIR" && timeout -k 15 "${TIMEOUT_S}s" "$PX4SIM_PYTHON" -u "$TARGET_SCRIPT" "${EXTRA_ARGS[@]}"); then
         after=$(ls -t "$PROJECT_DIR"/logs/*.csv 2>/dev/null | head -1)
         if [[ "$after" != "$before" ]]; then
             echo "$after" >> "$MANIFEST"

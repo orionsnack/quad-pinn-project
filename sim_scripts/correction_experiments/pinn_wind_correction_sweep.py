@@ -13,6 +13,7 @@ pinn_wind_correction_test.py(강풍 1개 조건)의 다중 조건 버전.
 (HEADLESS=1 make px4_sitl gz_x500_windy)
 """
 
+import argparse
 import asyncio
 import csv
 import datetime
@@ -59,8 +60,8 @@ def adaptive_gain(speed_est):
     t = max(0.0, min(1.0, t))
     return ACCEL_GAIN_MIN + (ACCEL_GAIN_MAX - ACCEL_GAIN_MIN) * t
 TRIAL_DURATION_S = 15.0
-CALM_SETTLE_S = 3.0
-PHASE_GAP_S = 2.0
+CALM_SETTLE_S = 5.0   # 12-23절: 3.0으로는 반복측정 시 분산이 극심함(최대 20배) 확인, 5.0으로 상향
+PHASE_GAP_S = 4.0     # 12-23절: 2.0으로는 반복측정 시 분산이 극심함 확인, 4.0으로 상향
 SAFE_ALTITUDE_M = 1.5
 TAKEOFF_TIMEOUT_S = 15.0
 LOG_INTERVAL_S = 0.05
@@ -424,4 +425,12 @@ async def run():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--calm-settle-s", type=float, default=CALM_SETTLE_S,
+                         help="조건 전환 시 무풍 안정화 대기 시간(초) - 12-22절 분산 원인 실험용")
+    parser.add_argument("--phase-gap-s", type=float, default=PHASE_GAP_S,
+                         help="OFF/ON phase 사이 대기 시간(초) - 12-22절 분산 원인 실험용")
+    args = parser.parse_args()
+    CALM_SETTLE_S = args.calm_settle_s
+    PHASE_GAP_S = args.phase_gap_s
     asyncio.run(run())

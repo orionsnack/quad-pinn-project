@@ -58,8 +58,8 @@ WIND_DEADBAND_DEFAULT = 1.0  # gain 스윕 중 고정
 MAX_ACCEL_MPS2 = 2.0
 
 TRIAL_DURATION_S = 18.0
-CALM_SETTLE_S = 3.0
-PHASE_GAP_S = 2.0
+CALM_SETTLE_S = 5.0   # 12-23절: 3.0으로는 반복측정 시 분산이 극심함(최대 20배) 확인, 5.0으로 상향
+PHASE_GAP_S = 4.0     # 12-23절: 2.0으로는 반복측정 시 분산이 극심함 확인, 4.0으로 상향
 SAFE_ALTITUDE_M = 1.5
 TAKEOFF_TIMEOUT_S = 15.0
 LOG_INTERVAL_S = 0.05
