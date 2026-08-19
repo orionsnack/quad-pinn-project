@@ -74,16 +74,26 @@ SEND_PERIOD_S = 1.0 / SEND_RATE_HZ
 
 
 async def set_wind(vx, vy, vz=0.0):
-    proc = await asyncio.create_subprocess_exec(
-        "gz", "topic", "-t", f"/world/{WORLD_NAME}/wind",
-        "-m", "gz.msgs.Wind",
-        "-p", f"linear_velocity: {{x: {vx}, y: {vy}, z: {vz}}}, enable_wind: true",
-    )
-    await proc.wait()
-    if proc.returncode != 0:
+    """gz topic pub은 1회성 CLI라, gz-transport 구독자 탐색(discovery, 보통
+    수백ms 걸림)이 끝나기 전에 프로세스가 끝나면 CLI는 성공(exit 0)을 보고해도
+    실제로 아무도 못 받을 수 있음 - 25회 반복측정 중 1회 실제로 발생 확인됨
+    (EXPERIMENTS.md 12-23절). 같은 값(멱등)을 짧은 간격으로 3번 재전송해서
+    완화 - 한 번이라도 discovery 이후에 도착하면 됨."""
+    last_returncode = None
+    for attempt in range(3):
+        proc = await asyncio.create_subprocess_exec(
+            "gz", "topic", "-t", f"/world/{WORLD_NAME}/wind",
+            "-m", "gz.msgs.Wind",
+            "-p", f"linear_velocity: {{x: {vx}, y: {vy}, z: {vz}}}, enable_wind: true",
+        )
+        await proc.wait()
+        last_returncode = proc.returncode
+        if attempt < 2:
+            await asyncio.sleep(0.15)
+    if last_returncode != 0:
         # 조용히 넘기면 바람이 실제로 안 걸린 채 트라이얼이 진행될 수 있음 - 실제로
         # 이걸로 엉터리 결과가 나온 적 있어(EXPERIMENTS.md 12-17/12-21절) 예외로 드러냄.
-        raise RuntimeError(f"gz topic pub 실패 (returncode={proc.returncode})")
+        raise RuntimeError(f"gz topic pub 실패 (returncode={last_returncode})")
 
 
 def sample_gust_episodes(n, seed):

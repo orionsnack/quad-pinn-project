@@ -813,6 +813,39 @@ CSV: `logs/pinn_rotation_correction_20260819_23*.csv`(5개),
 집계: `logs/aggregate_summary_pinn_rotation_correction_20260819_231355.csv`,
 패치 파일: `rotation_ff.patch`(저장소 루트).
 
+## 12-25. `gz topic pub` 침묵 실패 재발 원인 진단 및 재전송으로 완화 (2026-08-20)
+
+**배경**: 12-23절 회전 재검증에서 발견한 "리턴코드는 정상인데 바람이 실제로 안
+걸린" 1건(25회 중 1회)의 근본 원인을 조사함.
+
+**가설**: `gz topic pub`은 매 호출마다 새 프로세스로 뜨는 1회성 CLI임 — 메시지를
+실제로 구독자(바람 플러그인)에게 전달하려면 먼저 gz-transport의 구독자 탐색
+(discovery, UDP 멀티캐스트 기반이라 보통 수백ms 걸림)이 끝나야 함. 프로세스가
+discovery 완료 전에 메시지를 큐에 넣고 바로 종료하면, **CLI 자체는 성공(exit 0)을
+보고하지만 실제로는 아무 구독자에게도 안 갔을 수 있음** — 이게 리턴코드 체크만으로
+못 잡히는 이유.
+
+**조치**: `set_wind()`가 같은 값(멱등)을 150ms 간격으로 3번 재전송하도록 수정 —
+한 번이라도 discovery 완료 후에 도착하면 됨. 8개 파일(`wind_random_sweep.py`,
+`wind_gust_sweep.py`, `wind_random_dither_sweep.py`,
+`wind_yaw_generalization_test.py`, `pinn_wind_correction_sweep.py`,
+`pinn_wind_correction_gust_sweep.py`, `pinn_correction_param_tuning.py`,
+`pinn_rotation_correction_test.py`) 전부 동일하게 수정.
+
+**검증**: 회전 A/B 1회 실행(타임아웃 300초 안에 4/5 조건 완료, 5번째 조건 도중
+시간 초과로 끊김) — 4개 조건 전부 OFF 베이스라인이 정상 범위(0.3~7.0deg, 이상치
+없음)로 나옴. 다만 25회 중 1회(약 4%) 발생하던 드문 문제라, 이번 1회 시행으로
+"완전히 재발 안 함"까지 확인하긴 어려움 — 재발 여부는 향후 반복측정에서 계속
+지켜볼 것.
+
+**한계**: 근본적으로 `gz topic pub`을 1회성 CLI로 매번 새로 띄우는 구조 자체가
+이 문제의 원인이라, 재전송은 완화책이지 완전한 해결책은 아님. 확실히 없애려면
+지속적인 gz-transport 퍼블리셔(프로세스를 안 새로 띄우고 계속 열어두는 방식)로
+바꿔야 하는데, 지금 구조(매 조건 전환마다 짧게 호출)에는 과한 리팩터링이라 보류.
+
+CSV: `logs/pinn_rotation_correction_20260820_014603.csv`(검증용 1회, 5번째
+조건은 미완주).
+
 ---
 
 ## 다음 단계
