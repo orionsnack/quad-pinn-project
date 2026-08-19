@@ -1,0 +1,57 @@
+로드된 행 수: 846800, 조건 수: 2840
+윈도우 샘플 수: 790000 (window=20, features=9)
+
+=== 5-fold 교차검증 (조건 2840개를 5등분, 진단용 - 모델 저장 안 함, k_noise_sigma=0.02) ===
+  fold 1/5 (검증조건 568개, n_val=158380): wind_vx MAE=0.403  wind_vy MAE=0.465  speed MAE=0.371  rot_residual=2.999  best_epoch=51
+  fold 2/5 (검증조건 568개, n_val=157380): wind_vx MAE=0.411  wind_vy MAE=0.413  speed MAE=0.345  rot_residual=3.059  best_epoch=87
+  fold 3/5 (검증조건 568개, n_val=157780): wind_vx MAE=0.436  wind_vy MAE=0.457  speed MAE=0.350  rot_residual=3.019  best_epoch=65
+  fold 4/5 (검증조건 568개, n_val=157780): wind_vx MAE=0.466  wind_vy MAE=0.443  speed MAE=0.389  rot_residual=3.033  best_epoch=155
+  fold 5/5 (검증조건 568개, n_val=158680): wind_vx MAE=0.441  wind_vy MAE=0.425  speed MAE=0.342  rot_residual=3.044  best_epoch=174
+
+--- 5-fold 평균±표준편차 (단일 분할보다 훨씬 안정적인 성능 추정치) ---
+  wind_vx_mae: 0.431 ± 0.022  (범위 0.403~0.466)
+  wind_vy_mae: 0.441 ± 0.019  (범위 0.413~0.465)
+  speed_mae: 0.359 ± 0.018  (범위 0.342~0.389)
+  rot_omega_dot_residual_mae: 3.031 ± 0.020  (범위 2.999~3.059)
+
+=== 배포용 모델 학습 (단일 80/20 분할) ===
+train조건=2272  val조건=568
+  epoch    1  train_data_loss=1.5374  physics_loss=4.1637  rot_loss=26.8944  val_MAE=0.492m/s  k=0.0303
+  epoch    5  train_data_loss=0.9359  physics_loss=1.3773  rot_loss=24.4371  val_MAE=0.479m/s  k=0.0071
+  epoch   10  train_data_loss=0.8845  physics_loss=1.3767  rot_loss=24.2867  val_MAE=0.460m/s  k=0.0071
+  epoch   15  train_data_loss=0.8239  physics_loss=1.3766  rot_loss=24.2425  val_MAE=0.457m/s  k=0.0070
+  epoch   20  train_data_loss=0.7798  physics_loss=1.3766  rot_loss=24.2511  val_MAE=0.457m/s  k=0.0071
+  epoch   25  train_data_loss=0.7570  physics_loss=1.3767  rot_loss=24.2383  val_MAE=0.456m/s  k=0.0070
+  epoch   30  train_data_loss=0.7398  physics_loss=1.3766  rot_loss=24.2433  val_MAE=0.468m/s  k=0.0070
+  epoch   35  train_data_loss=0.7287  physics_loss=1.3766  rot_loss=24.2093  val_MAE=0.466m/s  k=0.0070
+  epoch   40  train_data_loss=0.7160  physics_loss=1.3765  rot_loss=24.2150  val_MAE=0.456m/s  k=0.0071
+  epoch   45  train_data_loss=0.7058  physics_loss=1.3766  rot_loss=24.2084  val_MAE=0.447m/s  k=0.0070
+  epoch   50  train_data_loss=0.7020  physics_loss=1.3767  rot_loss=24.1946  val_MAE=0.450m/s  k=0.0070
+  epoch   55  train_data_loss=0.6986  physics_loss=1.3765  rot_loss=24.1923  val_MAE=0.457m/s  k=0.0072
+  epoch   60  train_data_loss=0.6953  physics_loss=1.3766  rot_loss=24.1948  val_MAE=0.456m/s  k=0.0070
+  epoch   65  train_data_loss=0.6930  physics_loss=1.3766  rot_loss=24.1915  val_MAE=0.458m/s  k=0.0070
+  epoch   70  train_data_loss=0.6911  physics_loss=1.3766  rot_loss=24.1906  val_MAE=0.446m/s  k=0.0070
+  epoch   75  train_data_loss=0.6870  physics_loss=1.3766  rot_loss=24.1794  val_MAE=0.463m/s  k=0.0071
+  epoch   80  train_data_loss=0.6810  physics_loss=1.3766  rot_loss=24.1832  val_MAE=0.434m/s  k=0.0071
+  epoch   85  train_data_loss=0.6789  physics_loss=1.3766  rot_loss=24.1898  val_MAE=0.453m/s  k=0.0070
+  epoch   90  train_data_loss=0.6767  physics_loss=1.3766  rot_loss=24.2039  val_MAE=0.439m/s  k=0.0071
+  epoch   95  train_data_loss=0.6742  physics_loss=1.3766  rot_loss=24.1859  val_MAE=0.451m/s  k=0.0069
+  epoch  100  train_data_loss=0.6747  physics_loss=1.3766  rot_loss=24.1686  val_MAE=0.454m/s  k=0.0071
+  epoch  105  train_data_loss=0.6736  physics_loss=1.3767  rot_loss=24.1676  val_MAE=0.444m/s  k=0.0070
+  epoch  110  train_data_loss=0.6731  physics_loss=1.3766  rot_loss=24.1615  val_MAE=0.456m/s  k=0.0070
+  epoch  115  train_data_loss=0.6707  physics_loss=1.3767  rot_loss=24.1696  val_MAE=0.442m/s  k=0.0070
+  epoch  120  train_data_loss=0.6682  physics_loss=1.3767  rot_loss=24.1656  val_MAE=0.448m/s  k=0.0070
+  epoch  125  train_data_loss=0.6678  physics_loss=1.3766  rot_loss=24.1647  val_MAE=0.445m/s  k=0.0070
+  epoch  130  train_data_loss=0.6641  physics_loss=1.3766  rot_loss=24.1742  val_MAE=0.454m/s  k=0.0070
+  epoch  135  train_data_loss=0.6632  physics_loss=1.3766  rot_loss=24.1662  val_MAE=0.438m/s  k=0.0070
+  -> 50epoch 동안 개선 없어 조기 종료 (epoch 138, best_epoch=88)
+
+최적 체크포인트: epoch 88  val_MAE=0.433m/s
+=== 최종 검증(val, 미학습 바람조건 158380개, best checkpoint) ===
+  wind_vx MAE=0.407 m/s  wind_vy MAE=0.459 m/s
+  풍속(speed) MAE=0.385 m/s (평균 실제 풍속=5.17 m/s)
+  학습된 항력계수 k = 0.00703
+  [회전] omega_dot 물리잔차 MAE = 3.0197 rad/s^2
+  [회전] tau_disturbance 평균 크기 = 0.0860 N*m
+
+모델 저장됨: /home/ssh2003/MyProjects/quad-pinn-project/offline_training/wind_estimator.pt
