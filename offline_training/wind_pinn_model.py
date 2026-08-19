@@ -154,16 +154,25 @@ class WindPINN(nn.Module):
         return torch.exp(self.log_k)
 
 
-def physics_residual(model, wind_pred_enu, v_drone_ned):
-    """(병진, 변경 없음) wind_pred_enu: (B,2) = [vx_enu(East), vy_enu(North)] 모델 출력의
-    앞 2개 열. ENU -> NED 변환 후 항력 방정식(a = k*|v_rel|*v_rel)으로 항력 가속도 예측."""
+def physics_residual(model, wind_pred_enu, v_drone_ned, k_noise_sigma=0.0):
+    """(병진) wind_pred_enu: (B,2) = [vx_enu(East), vy_enu(North)] 모델 출력의
+    앞 2개 열. ENU -> NED 변환 후 항력 방정식(a = k*|v_rel|*v_rel)으로 항력 가속도 예측.
+
+    k_noise_sigma>0이면 RAMP-Net(Eq.9-10) 방식의 파라메트릭 불확실성 주입: 물리손실
+    계산에 쓰는 k에 배치마다 상대 노이즈 k*(1+N(0,sigma))를 섞어서, "정확한 항력계수를
+    모르는 상황"에도 모델이 강인해지도록 유도(EXPERIMENTS.md 12-15/12-22절). 기본값
+    0.0이면 노이즈가 정확히 0이라 기존 동작과 완전히 동일 - 배포 파이프라인은 이 인자를
+    안 넘기므로 영향 없음."""
     wind_north = wind_pred_enu[:, 1]
     wind_east = wind_pred_enu[:, 0]
     v_rel_n = wind_north - v_drone_ned[:, 0]
     v_rel_e = wind_east - v_drone_ned[:, 1]
     speed_rel = torch.sqrt(v_rel_n ** 2 + v_rel_e ** 2 + 1e-6)
-    a_pred_n = model.k * speed_rel * v_rel_n
-    a_pred_e = model.k * speed_rel * v_rel_e
+    k = model.k
+    if k_noise_sigma > 0:
+        k = k * (1.0 + k_noise_sigma * torch.randn((), device=k.device))
+    a_pred_n = k * speed_rel * v_rel_n
+    a_pred_e = k * speed_rel * v_rel_e
     return torch.stack([a_pred_n, a_pred_e], dim=1)
 
 

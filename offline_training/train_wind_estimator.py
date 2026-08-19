@@ -119,7 +119,8 @@ def build_windows(df: pd.DataFrame):
     return X, y, acc, vdrone, omega_dot, actuator, cond
 
 
-def train_one_split(X, y, acc, vdrone, omega_dot, actuator, train_mask, val_mask, verbose=False):
+def train_one_split(X, y, acc, vdrone, omega_dot, actuator, train_mask, val_mask, verbose=False,
+                     k_noise_sigma=0.0):
     """train_mask/val_mask 기준으로 정규화(train만 기준) 후 학습, best checkpoint 반환.
     best checkpoint는 병진 val_MAE(wind_vx/vy) 기준으로 고름 - 회전 쪽은 정답 라벨이
     없어 같은 방식으로 비교할 기준이 없기 때문(위 모듈 docstring 참고)."""
@@ -153,7 +154,7 @@ def train_one_split(X, y, acc, vdrone, omega_dot, actuator, train_mask, val_mask
             wind_pred, tau_dist_pred = pred[:, :2], pred[:, 2:5]
 
             data_loss = nn.functional.mse_loss(wind_pred, ytr[idx])
-            a_pred = physics_residual(model, wind_pred, vdtr[idx])
+            a_pred = physics_residual(model, wind_pred, vdtr[idx], k_noise_sigma=k_noise_sigma)
             physics_loss = nn.functional.mse_loss(a_pred, acctr[idx])
 
             omega_dot_pred = physics_residual_rotation(tau_dist_pred, acttr[idx])
@@ -217,20 +218,22 @@ def train_one_split(X, y, acc, vdrone, omega_dot, actuator, train_mask, val_mask
     return model, best_state, X_mean, X_std, metrics
 
 
-def run_kfold(X, y, acc, vdrone, omega_dot, actuator, cond, k):
+def run_kfold(X, y, acc, vdrone, omega_dot, actuator, cond, k, k_noise_sigma=0.0):
     unique_conds = np.unique(cond)
     rng = np.random.RandomState(0)
     rng.shuffle(unique_conds)
     folds = np.array_split(unique_conds, k)
 
-    print(f"\n=== {k}-fold 교차검증 (조건 {len(unique_conds)}개를 {k}등분, 진단용 - 모델 저장 안 함) ===")
+    print(f"\n=== {k}-fold 교차검증 (조건 {len(unique_conds)}개를 {k}등분, 진단용 - 모델 저장 안 함, "
+          f"k_noise_sigma={k_noise_sigma}) ===")
     all_metrics = []
     for i, fold_conds in enumerate(folds):
         val_conds = set(fold_conds.tolist())
         val_mask = np.isin(cond, list(val_conds))
         train_mask = ~val_mask
         _, _, _, _, metrics = train_one_split(
-            X, y, acc, vdrone, omega_dot, actuator, train_mask, val_mask, verbose=False)
+            X, y, acc, vdrone, omega_dot, actuator, train_mask, val_mask, verbose=False,
+            k_noise_sigma=k_noise_sigma)
         print(f"  fold {i+1}/{k} (검증조건 {len(fold_conds)}개, n_val={metrics['n_val']}): "
               f"wind_vx MAE={metrics['wind_vx_mae']:.3f}  wind_vy MAE={metrics['wind_vy_mae']:.3f}  "
               f"speed MAE={metrics['speed_mae']:.3f}  rot_residual={metrics['rot_omega_dot_residual_mae']:.3f}  "
@@ -250,6 +253,10 @@ def main():
     parser.add_argument("csvs", nargs="+", help="wind_random_*.csv / wind_gust_*.csv")
     parser.add_argument("--kfold", type=int, default=0,
                          help="k-fold 교차검증 fold 수 (0이면 끔, 순수 진단용이라 모델 저장 안 함)")
+    parser.add_argument("--k-noise-sigma", type=float, default=0.0,
+                         help="RAMP-Net 파라메트릭 불확실성 주입 강도 (0=끔, 기존 동작과 동일). "
+                              "물리손실 계산에 쓰는 항력계수 k에 상대 노이즈 N(0,sigma)를 섞음 "
+                              "(EXPERIMENTS.md 12-15/12-22절)")
     args = parser.parse_args()
 
     dfs = [pd.read_csv(p) for p in args.csvs]
@@ -265,7 +272,8 @@ def main():
     print(f"윈도우 샘플 수: {len(X)} (window={WINDOW}, features={len(FEATURES)})")
 
     if args.kfold and args.kfold >= 2:
-        run_kfold(X, y, acc, vdrone, omega_dot, actuator, cond, args.kfold)
+        run_kfold(X, y, acc, vdrone, omega_dot, actuator, cond, args.kfold,
+                  k_noise_sigma=args.k_noise_sigma)
 
     # --- 배포용 모델: 단일 80/20 분할로 학습 + 저장 ---
     print(f"\n=== 배포용 모델 학습 (단일 {int((1-VAL_FRACTION)*100)}/{int(VAL_FRACTION*100)} 분할) ===")
@@ -279,7 +287,8 @@ def main():
     print(f"train조건={len(unique_conds)-n_val}  val조건={n_val}")
 
     model, best_state, X_mean, X_std, metrics = train_one_split(
-        X, y, acc, vdrone, omega_dot, actuator, train_mask, val_mask, verbose=True)
+        X, y, acc, vdrone, omega_dot, actuator, train_mask, val_mask, verbose=True,
+        k_noise_sigma=args.k_noise_sigma)
 
     print(f"\n최적 체크포인트: epoch {metrics['best_epoch']}  val_MAE={metrics['best_val_mae']:.3f}m/s")
     print(f"=== 최종 검증(val, 미학습 바람조건 {metrics['n_val']}개, best checkpoint) ===")

@@ -77,6 +77,10 @@ async def set_wind(vx, vy, vz=0.0):
         "-p", f"linear_velocity: {{x: {vx}, y: {vy}, z: {vz}}}, enable_wind: true",
     )
     await proc.wait()
+    if proc.returncode != 0:
+        # 조용히 넘기면 바람이 실제로 안 걸린 채 트라이얼이 진행될 수 있음 - 실제로
+        # 이걸로 엉터리 결과가 나온 적 있어(EXPERIMENTS.md 12-17/12-21절) 예외로 드러냄.
+        raise RuntimeError(f"gz topic pub 실패 (returncode={proc.returncode})")
 
 
 class WindCorrector:
