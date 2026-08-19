@@ -1,0 +1,5 @@
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260820_001259.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260820_001947.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260820_002636.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260820_003324.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260820_004011.csv
