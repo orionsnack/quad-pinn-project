@@ -1,0 +1,103 @@
+commit 472bcbc3cfa1a641b2dafebda289397e27bc14e4
+Author: orionsnack <ssh20031105@gmail.com>
+Date:   Sun Aug 16 18:30:06 2026 +0900
+
+    Add external torque feedforward channel for PINN disturbance correction
+    
+    Adds a MAVLink DEBUG_VECT("TAU_FF", x, y, z) receive path in
+    mc_rate_control that adds directly to the normalized torque_setpoint
+    computed by the rate controller, clamped to [-1,1] and faded out to
+    zero if no fresh value has arrived in the last 200ms. Uses PX4's
+    existing debug_vect uORB topic (mavlink_receiver already publishes
+    inbound DEBUG_VECT there) rather than adding a new message type.
+    
+    This is a local research patch for quad-pinn-project
+    (github.com/orionsnack/quad-pinn-project) - it lets an external process
+    (MAVSDK's mavlink_direct plugin) inject a learned rotational disturbance
+    torque estimate as feedforward correction on top of PX4's existing rate
+    PID, without replacing or bypassing the controller. Not intended for
+    upstream submission; kept on this branch rather than main so `main`
+    stays clean for pulling upstream PX4 changes.
+
+diff --git a/src/modules/mc_rate_control/MulticopterRateControl.cpp b/src/modules/mc_rate_control/MulticopterRateControl.cpp
+index 7bfb83037b..b516bab13f 100644
+--- a/src/modules/mc_rate_control/MulticopterRateControl.cpp
++++ b/src/modules/mc_rate_control/MulticopterRateControl.cpp
+@@ -33,6 +33,7 @@
+ 
+ #include "MulticopterRateControl.hpp"
+ 
++#include <cstring>
+ #include <drivers/drv_hrt.h>
+ #include <circuit_breaker/circuit_breaker.h>
+ #include <mathlib/math/Limits.hpp>
+@@ -150,6 +151,17 @@ MulticopterRateControl::Run()
+ 
+ 		_vehicle_status_sub.update(&_vehicle_status);
+ 
++		// PINN tau_disturbance 피드포워드: MAVLink DEBUG_VECT("TAU_FF", x, y, z)로 온
++		// 값만 채택 (다른 이름의 debug_vect와 섞이지 않도록 이름 확인).
++		debug_vect_s debug_vect;
++
++		if (_debug_vect_sub.update(&debug_vect)) {
++			if (memcmp(debug_vect.name, "TAU_FF", 6) == 0) {
++				_tau_dist_ff = Vector3f(debug_vect.x, debug_vect.y, debug_vect.z);
++				_tau_dist_ff_timestamp = hrt_absolute_time();
++			}
++		}
++
+ 		// use rates setpoint topic
+ 		vehicle_rates_setpoint_s vehicle_rates_setpoint{};
+ 
+@@ -219,6 +231,15 @@ MulticopterRateControl::Run()
+ 			Vector3f torque_setpoint =
+ 				_rate_control.update(rates, _rates_setpoint, angular_accel, dt, _maybe_landed || _landed);
+ 
++			// PINN tau_disturbance 피드포워드 적용 (최근 TAU_DIST_FF_TIMEOUT 이내에
++			// 갱신된 값일 때만 - 값이 끊기면 자동으로 0으로 페이드아웃해서 안전).
++			if (hrt_elapsed_time(&_tau_dist_ff_timestamp) < TAU_DIST_FF_TIMEOUT) {
++				torque_setpoint += _tau_dist_ff;
++				torque_setpoint(0) = math::constrain(torque_setpoint(0), -1.f, 1.f);
++				torque_setpoint(1) = math::constrain(torque_setpoint(1), -1.f, 1.f);
++				torque_setpoint(2) = math::constrain(torque_setpoint(2), -1.f, 1.f);
++			}
++
+ 			// apply low-pass filtering on yaw axis to reduce high frequency torque caused by rotor acceleration
+ 			torque_setpoint(2) = _output_lpf_yaw.update(torque_setpoint(2), dt);
+ 
+diff --git a/src/modules/mc_rate_control/MulticopterRateControl.hpp b/src/modules/mc_rate_control/MulticopterRateControl.hpp
+index 44c6c13bc4..584a0541bd 100644
+--- a/src/modules/mc_rate_control/MulticopterRateControl.hpp
++++ b/src/modules/mc_rate_control/MulticopterRateControl.hpp
+@@ -50,6 +50,7 @@
+ #include <uORB/topics/actuator_controls_status.h>
+ #include <uORB/topics/battery_status.h>
+ #include <uORB/topics/control_allocator_status.h>
++#include <uORB/topics/debug_vect.h>
+ #include <uORB/topics/manual_control_setpoint.h>
+ #include <uORB/topics/parameter_update.h>
+ #include <uORB/topics/rate_ctrl_status.h>
+@@ -96,6 +97,10 @@ private:
+ 
+ 	uORB::Subscription _battery_status_sub{ORB_ID(battery_status)};
+ 	uORB::Subscription _control_allocator_status_sub{ORB_ID(control_allocator_status)};
++	// PINN 회전 방해토크(tau_disturbance) 외부 피드포워드 주입용 (졸업세미나 과제).
++	// MAVLink DEBUG_VECT("TAU_FF", x, y, z)를 PX4가 자동으로 이 토픽에 발행해줌 -
++	// 새 uORB 메시지/MAVLink 핸들러를 안 만들어도 되는 표준 채널.
++	uORB::Subscription _debug_vect_sub{ORB_ID(debug_vect)};
+ 	uORB::Subscription _manual_control_setpoint_sub{ORB_ID(manual_control_setpoint)};
+ 	uORB::Subscription _vehicle_control_mode_sub{ORB_ID(vehicle_control_mode)};
+ 	uORB::Subscription _vehicle_land_detected_sub{ORB_ID(vehicle_land_detected)};
+@@ -129,6 +134,12 @@ private:
+ 	float _battery_status_scale{0.0f};
+ 	matrix::Vector3f _thrust_setpoint{};
+ 
++	// tau_disturbance 피드포워드 상태 (정규화 토크 단위, [-1,1] 스케일은 Python
++	// 쪽에서 미리 곱해서 보냄). 일정 시간 새 값이 안 오면 0으로 페이드아웃(안전장치).
++	matrix::Vector3f _tau_dist_ff{};
++	hrt_abstime _tau_dist_ff_timestamp{0};
++	static constexpr hrt_abstime TAU_DIST_FF_TIMEOUT{200_ms};
++
+ 	float _energy_integration_time{0.0f};
+ 	float _control_energy[4] {};
+ 
