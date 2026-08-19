@@ -683,6 +683,54 @@ gust 쪽은 고정바람보다 결과가 훨씬 안정적임 — 4개 조건 평
 CSV: `logs/pinn_correction_gust_sweep_20260819_21*.csv`(5개),
 집계: `logs/aggregate_summary_pinn_correction_gust_sweep_20260819_213008.csv`.
 
+## 12-23. PX4 펌웨어 패치 유실 발견 및 랩실 PC에서 복구, 반복측정으로 재검증 (2026-08-19)
+
+**발견**: 12-21절 1번 항목(펌웨어 패치가 diff로 저장 안 됨)이 실제로 현실이 된 걸
+확인함 — 12-22절 작업 중 새로 클론한 `PX4-Autopilot`에 회전 피드포워드 패치
+(`mc_rate_control.cpp`/`.hpp`, 12-16절)가 전혀 없었음. 처음엔 "별개의 SITL
+환경이라 그렇다"로 오판했으나(12-22절 정정 참고), 실제로는 **이 머신이 랩실 PC와
+동일한 원본 환경이고, 예전에 `PX4-Autopilot`을 `rm -rf`로 정리하면서 같이
+지워진 것**이었음.
+
+**복구**: 다행히 원본 작업이 실제로는 **랩실 PC**(이 프로젝트가 원래 개발되던
+물리적으로 다른 컴퓨터)에도 별도로 남아있었음 — 거기 로컬 브랜치
+(`rotation-feedforward-patch`, 커밋 `472bcbc3cf`)에 패치가 커밋된 채로 보존돼
+있었음. `git show 472bcbc3cf > rotation_ff.patch`로 추출해 `quad-pinn-project`에
+커밋(`rotation_ff.patch`, 저장소 루트) → 이 머신에서 `git apply`로 재적용 →
+재빌드까지 성공.
+
+> 과정에서 겪은 잡음: 랩실 PC의 야간 DNS 문제로 `git push`가 막혀서 Windows
+> PowerShell로 `\\wsl.localhost\Ubuntu-24.04\...` UNC 경로를 거쳐 우회 push함 —
+> 이 과정에서 `core.fileMode` 관련 mode-bit 잡음(9P/CIFS 브릿지가 실행권한
+> 비트를 못 지킴)도 겪어서 `git config core.fileMode false`로 해결.
+
+**검증 — 5회 반복 A/B** (`pinn_rotation_correction_test.py`, `repeat_sweep.sh`로
+5회, gain=0.2):
+
+| 조건 | 개선율 평균 | 표준편차 | 범위 | 12-17절 원본(1회) |
+|---|---|---|---|---|
+| calm | +5.6% | 12.1%p | -12.5%~+20.0% | -24.4% |
+| light | **-6.7%** | 7.7%p | **-22.1%~-2.2%**(5회 전부 음수) | -4.2% |
+| default | +3.2% | 3.5%p | -2.0%~+8.1% | +5.5% |
+| strong | -1.1% | 1.2%p | -2.6%~+0.4% | +3.3% |
+| crosswind | **+6.7%** | 3.0%p | **+1.6%~+10.6%**(5회 전부 양수) | +1.0% |
+
+**해석**: 고정바람(12-22절)만큼 극심한 노이즈는 안 나옴 — `light`(전부 음수)와
+`crosswind`(전부 양수)는 방향이 5회 내내 일관돼서 통계적으로도 확신 가능한 수준.
+두 조건 다 12-17절 원본과 부호가 일치함(light 손해, crosswind 이익). `default`도
+대체로 양수. `calm`/`strong`은 0 근처에서 왔다갔다(원본에서도 절댓값이 제일
+작았던 조건들). **결론: 복구된 패치가 원본과 동일한 물리적 동작을 한다는 게
+반복측정으로 확인됨** — 12-21절 1번 항목의 위험이 실제로 현실화됐다가 완전히
+해소된 사례.
+
+**교훈**: 원격지(랩실 PC 등)에 별도로 남아있는 사본을 확인하지 않고 "유실됐다"고
+성급히 결론내릴 뻔했음 — 여러 물리적 위치에서 작업하는 프로젝트는 "어디에 뭐가
+있는지"부터 확인하는 게 우선.
+
+CSV: `logs/pinn_rotation_correction_20260819_23*.csv`(5개),
+집계: `logs/aggregate_summary_pinn_rotation_correction_20260819_231355.csv`,
+패치 파일: `rotation_ff.patch`(저장소 루트).
+
 ---
 
 ## 다음 단계
