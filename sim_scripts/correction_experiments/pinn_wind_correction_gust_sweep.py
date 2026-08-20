@@ -22,23 +22,27 @@ Gazebo에는 GUST_UPDATE_INTERVAL_S 간격으로만 갱신(계단식 근사, win
 import asyncio
 import csv
 import datetime
+import functools
 import math
 import sys
 import time
 from pathlib import Path
 
-import torch
 from mavsdk import System
 from mavsdk.offboard import (OffboardError, PositionNedYaw, VelocityNedYaw, AccelerationNed)
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "offline_training"))
-from wind_pinn_model import WindPINN, WINDOW, FEATURES, yaw_decompose  # noqa: E402
+from wind_pinn_model import FEATURES, yaw_decompose  # noqa: E402
+from correction_common import (  # noqa: E402
+    set_wind as _set_wind, PINNCorrector, EmaSmoother, apply_deadband,
+)
 
 
 # ============================================================
 # 실험 파라미터
 # ============================================================
 WORLD_NAME = "windy"
+set_wind = functools.partial(_set_wind, WORLD_NAME)
 # (label, base_vx, base_vy, amp_fraction, period_s)
 # base_vx/base_vy는 pinn_wind_correction_sweep.py의 light/default/strong/crosswind와
 # 동일한 방향 - 고정바람 결과와 나란히 비교하기 위함. calm은 base_speed=0이라 방향이
@@ -65,29 +69,6 @@ SEND_PERIOD_S = 1.0 / SEND_RATE_HZ
 MODEL_PATH = Path(__file__).parent.parent.parent / "offline_training" / "wind_estimator.pt"
 
 
-async def set_wind(vx, vy, vz=0.0):
-    """gz topic pub은 1회성 CLI라, gz-transport 구독자 탐색(discovery, 보통
-    수백ms 걸림)이 끝나기 전에 프로세스가 끝나면 CLI는 성공(exit 0)을 보고해도
-    실제로 아무도 못 받을 수 있음 - 25회 반복측정 중 1회 실제로 발생 확인됨
-    (EXPERIMENTS.md 12-23절). 같은 값(멱등)을 짧은 간격으로 3번 재전송해서
-    완화 - 한 번이라도 discovery 이후에 도착하면 됨."""
-    last_returncode = None
-    for attempt in range(3):
-        proc = await asyncio.create_subprocess_exec(
-            "gz", "topic", "-t", f"/world/{WORLD_NAME}/wind",
-            "-m", "gz.msgs.Wind",
-            "-p", f"linear_velocity: {{x: {vx}, y: {vy}, z: {vz}}}, enable_wind: true",
-        )
-        await proc.wait()
-        last_returncode = proc.returncode
-        if attempt < 2:
-            await asyncio.sleep(0.15)
-    if last_returncode != 0:
-        # 조용히 넘기면 바람이 실제로 안 걸린 채 트라이얼이 진행될 수 있음 - 실제로
-        # 이걸로 엉터리 결과가 나온 적 있어(EXPERIMENTS.md 12-17/12-21절) 예외로 드러냄.
-        raise RuntimeError(f"gz topic pub 실패 (returncode={last_returncode})")
-
-
 def wind_at(cond, t):
     """cond: (label, base_vx, base_vy, amp_fraction, period_s). 방향은 base_vx/base_vy
     고정, 크기만 사인파로 진동. speed는 amp_fraction<1이면 항상 양수 유지됨."""
@@ -99,54 +80,6 @@ def wind_at(cond, t):
     speed = base_speed * (1.0 + amp_fraction * math.sin(2 * math.pi * t / period_s))
     speed = max(speed, 0.0)
     return speed * ux, speed * uy
-
-
-class WindCorrector:
-    def __init__(self, model_path):
-        ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
-        self.model = WindPINN(ckpt["window"], len(ckpt["features"]))
-        self.model.load_state_dict(ckpt["model_state"])
-        self.model.eval()
-        self.X_mean = torch.tensor(ckpt["X_mean"], dtype=torch.float32)
-        self.X_std = torch.tensor(ckpt["X_std"], dtype=torch.float32)
-        self.window = ckpt["window"]
-        self.features = ckpt["features"]
-        self.buffer = []
-
-    def push_state(self, feat_vec):
-        self.buffer.append(feat_vec)
-        if len(self.buffer) > self.window:
-            self.buffer.pop(0)
-
-    def ready(self):
-        return len(self.buffer) == self.window
-
-    @torch.no_grad()
-    def estimate_wind_ned(self):
-        x = torch.tensor(self.buffer, dtype=torch.float32).flatten()
-        xn = (x - self.X_mean) / self.X_std
-        wind_enu = self.model(xn.unsqueeze(0)).squeeze(0)
-        return wind_enu[1].item(), wind_enu[0].item()  # (north, east)
-
-
-class EmaSmoother:
-    def __init__(self, time_constant_s, dt_s):
-        self.alpha = dt_s / (time_constant_s + dt_s)
-        self.value = None
-
-    def update(self, x):
-        self.value = x if self.value is None else self.alpha * x + (1 - self.alpha) * self.value
-        return self.value
-
-
-def apply_deadband(wind_n, wind_e, deadband):
-    """speed<=deadband면 (0,0), 그 이상이면 방향 유지한 채 크기만
-    (speed-deadband)만큼으로 줄임 - 문턱값에서 뚝 끊기지 않고 연속적으로 이어짐."""
-    speed = (wind_n ** 2 + wind_e ** 2) ** 0.5
-    if speed <= deadband or speed == 0.0:
-        return 0.0, 0.0
-    scale = (speed - deadband) / speed
-    return wind_n * scale, wind_e * scale
 
 
 async def run():
@@ -166,7 +99,7 @@ async def run():
             break
 
     print(f"\n모델 로드: {MODEL_PATH}")
-    corrector = WindCorrector(MODEL_PATH)
+    corrector = PINNCorrector(MODEL_PATH)
     print(f"  window={corrector.window}  features={corrector.features}")
 
     await set_wind(0.0, 0.0)
@@ -321,7 +254,8 @@ async def run():
 
             wind_n, wind_e = 0.0, 0.0
             if use_correction and corrector.ready():
-                raw_n, raw_e = corrector.estimate_wind_ned()
+                wind_enu = corrector.predict_raw()
+                raw_n, raw_e = wind_enu[1].item(), wind_enu[0].item()
                 wind_n = smoother_n.update(raw_n)
                 wind_e = smoother_e.update(raw_e)
                 wind_n, wind_e = apply_deadband(wind_n, wind_e, WIND_DEADBAND_MPS)

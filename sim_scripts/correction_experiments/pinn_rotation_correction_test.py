@@ -18,19 +18,21 @@ tau_disturbance 피드포워드 패치(mc_rate_control.cpp/hpp)로 재빌드되�
 import asyncio
 import csv
 import datetime
+import functools
 import sys
 import time
 from pathlib import Path
 
-import torch
 from mavsdk import System
 from mavsdk.offboard import OffboardError, PositionNedYaw, VelocityNedYaw, AccelerationNed
 from mavsdk.mavlink_direct import MavlinkMessage
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "offline_training"))
-from wind_pinn_model import WindPINN, FEATURES, yaw_decompose  # noqa: E402
+from wind_pinn_model import FEATURES, yaw_decompose  # noqa: E402
+from correction_common import set_wind as _set_wind, PINNCorrector  # noqa: E402
 
 WORLD_NAME = "windy"
+set_wind = functools.partial(_set_wind, WORLD_NAME)
 # 병진 A/B(pinn_wind_correction_sweep.py)와 동일한 표준 5조건 - 회전 쪽 초기
 # 검증(12-16/12-17절)은 3조건(calm/default/strong)만 썼으므로, gain=0.2가 더
 # 넓은 조건에서도 유효한지 보려면 light/crosswind까지 포함해야 함.
@@ -77,57 +79,6 @@ TAUFF_PERIOD_S = 1.0 / TAUFF_RATE_HZ
 MODEL_PATH = Path(__file__).parent.parent.parent / "offline_training" / "wind_estimator.pt"
 
 
-async def set_wind(vx, vy, vz=0.0):
-    """gz topic pub은 1회성 CLI라, gz-transport 구독자 탐색(discovery, 보통
-    수백ms 걸림)이 끝나기 전에 프로세스가 끝나면 CLI는 성공(exit 0)을 보고해도
-    실제로 아무도 못 받을 수 있음 - 25회 반복측정 중 1회 실제로 발생 확인됨
-    (EXPERIMENTS.md 12-23절). 같은 값(멱등)을 짧은 간격으로 3번 재전송해서
-    완화 - 한 번이라도 discovery 이후에 도착하면 됨."""
-    last_returncode = None
-    for attempt in range(3):
-        proc = await asyncio.create_subprocess_exec(
-            "gz", "topic", "-t", f"/world/{WORLD_NAME}/wind",
-            "-m", "gz.msgs.Wind",
-            "-p", f"linear_velocity: {{x: {vx}, y: {vy}, z: {vz}}}, enable_wind: true",
-        )
-        await proc.wait()
-        last_returncode = proc.returncode
-        if attempt < 2:
-            await asyncio.sleep(0.15)
-    if last_returncode != 0:
-        # 조용히 넘기면 바람이 실제로 안 걸린 채 트라이얼이 진행될 수 있음 - 실제로
-        # 이걸로 엉터리 결과가 나온 적 있어(EXPERIMENTS.md 12-17/12-21절) 예외로 드러냄.
-        raise RuntimeError(f"gz topic pub 실패 (returncode={last_returncode})")
-
-
-class RotationCorrector:
-    def __init__(self, model_path):
-        ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
-        self.model = WindPINN(ckpt["window"], len(ckpt["features"]))
-        self.model.load_state_dict(ckpt["model_state"])
-        self.model.eval()
-        self.X_mean = torch.tensor(ckpt["X_mean"], dtype=torch.float32)
-        self.X_std = torch.tensor(ckpt["X_std"], dtype=torch.float32)
-        self.window = ckpt["window"]
-        self.features = ckpt["features"]
-        self.buffer = []
-
-    def push_state(self, feat_vec):
-        self.buffer.append(feat_vec)
-        if len(self.buffer) > self.window:
-            self.buffer.pop(0)
-
-    def ready(self):
-        return len(self.buffer) == self.window
-
-    @torch.no_grad()
-    def estimate_tau_dist(self):
-        x = torch.tensor(self.buffer, dtype=torch.float32).flatten()
-        xn = (x - self.X_mean) / self.X_std
-        pred = self.model(xn.unsqueeze(0)).squeeze(0)
-        return pred[2].item(), pred[3].item(), pred[4].item()  # tau_x, tau_y, tau_z (N*m)
-
-
 async def run():
     drone = System()
 
@@ -145,7 +96,7 @@ async def run():
             break
 
     print(f"\n모델 로드: {MODEL_PATH}")
-    corrector = RotationCorrector(MODEL_PATH)
+    corrector = PINNCorrector(MODEL_PATH)
     print(f"  window={corrector.window}  features={corrector.features}")
 
     await set_wind(0.0, 0.0)
@@ -300,7 +251,8 @@ async def run():
 
             tau_x = tau_y = tau_z = 0.0
             if use_correction and corrector.ready():
-                tau_x, tau_y, tau_z = corrector.estimate_tau_dist()
+                pred = corrector.predict_raw()
+                tau_x, tau_y, tau_z = pred[2].item(), pred[3].item(), pred[4].item()  # N*m
                 ff_x = max(-MAX_TAU_FF, min(MAX_TAU_FF, -TAU_FF_GAIN * tau_x))
                 ff_y = max(-MAX_TAU_FF, min(MAX_TAU_FF, -TAU_FF_GAIN * tau_y))
                 ff_z = max(-MAX_TAU_FF, min(MAX_TAU_FF, -TAU_FF_GAIN * tau_z))

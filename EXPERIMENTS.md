@@ -1329,6 +1329,52 @@ CSV: `logs/wind_transition_20260820_235946_n40_seed777.csv`(재수집 최종본,
 
 ---
 
+## 12-33. correction_experiments 코드 중복 정리 (2026-08-21)
+
+**배경**: 12-21절(코드 셀프 리뷰) 2번 항목으로 지적됐던 것 - `set_wind()`,
+`EmaSmoother`, `apply_deadband()`, `WindCorrector`/`RotationCorrector` 클래스가
+`pinn_correction_param_tuning.py`/`pinn_wind_correction_sweep.py`/
+`pinn_wind_correction_gust_sweep.py`/`pinn_rotation_correction_test.py` 4개
+파일에 토씨 하나 안 틀리고 그대로 복붙돼 있었음. **직접적인 계기**: 12-31절에서
+`set_wind()`의 반복 재발행 버그를 발견했을 때, 이게 복붙 코드였던 탓에
+`pinn_correction_param_tuning.py`만 고치고 `wind_transition_sweep.py`(다른
+디렉토리의 별도 스크립트, 이건 애초에 공유 대상 아님)에 있는 같은 버그를 뒤늦게
+따로 찾아야 했음 - 만약 이 4개가 애초에 공유 모듈이었다면 한 번만 고치면 됐을 일.
+
+**방법**: `sim_scripts/correction_experiments/correction_common.py` 신설, 4개
+파일에서 diff로 바이트 단위까지 동일함을 먼저 확인한 뒤 옮김:
+- `set_wind()`: 4개 파일 전부 완전히 동일 (diff 없음) - `world_name`을 인자로
+  받도록만 바꾸고, 각 파일에서는 `functools.partial(set_wind, WORLD_NAME)`로
+  기존 호출부(`set_wind(vx, vy)`) 시그니처를 그대로 유지.
+- `WindCorrector`/`RotationCorrector`: `__init__`/`push_state`/`ready`는
+  3개 파일에서 완전히 동일 확인, 마지막 추론 메서드만 출력 인덱싱이 다름(풍속
+  2채널 vs 회전토크 3채널). `PINNCorrector`로 통합하고 원시 출력(`predict_raw()`)만
+  제공 - 인덱싱은 호출부에 남겨둠(같은 체크포인트의 다른 출력 채널을 쓰는 두
+  용도를 억지로 한 메서드로 합치지 않기 위함).
+- `EmaSmoother`/`apply_deadband()`: 2~3개 파일에서 완전히 동일(사소한 docstring
+  유무 차이만 있었음) - 그대로 이동.
+- 텔레메트리 모니터/오프보드 송신기/이착륙 시퀀스 등 나머지 중복(파일당
+  ~80~100줄)은 **일부러 손 안 댐** - 각 스크립트의 클로저 변수(`current_cmd`,
+  `nominal` 등)와 얽혀 있어 리팩터링 리스크가 더 크고, 마침 SITL이 gust 데이터
+  수집으로 몇 시간 점유돼 있어 실비행으로 검증할 방법이 없었음. 순수 유틸리티성
+  코드(부작용 없고 입출력이 명확한 것)만 안전하게 옮김.
+
+**검증**: SITL 없이 할 수 있는 만큼 - `py_compile`로 4개 파일 전부 문법 확인,
+`import`로 모듈 로드 확인(임포트 시점에 실행되는 코드가 없어 이걸로 순환
+임포트·이름 오류는 잡힘), AST로 미사용 import 확인(원래도 안 쓰이던
+`WINDOW` import 3개 파일에서 발견 - 겸사겸사 정리). **실제 SITL 비행으로 동작
+동일성까지 확인은 못 했음** - gust 수집이 끝나는 대로 스팟체크 필요.
+
+**결과**: 4개 파일 합계 약 244줄 감소(278줄 삭제, 34줄 추가), 신규
+`correction_common.py` 88줄. `set_wind`/`EmaSmoother`/`apply_deadband`/코렉터
+클래스가 이제 한 곳에만 존재.
+
+**다음에 볼 것**: gust 데이터 수집(12-34절 예정) 끝나고 SITL이 비면
+`pinn_wind_correction_sweep.py` 짧게 한 번 돌려서 리팩터링 전후 동작이 같은지
+스팟체크. 텔레메트리 모니터/오프보드 송신 보일러플레이트 정리는 여전히 남은 일.
+
+---
+
 ## 다음 단계
 
 **완료**(자세한 내용은 위 각 절 참고):
@@ -1364,7 +1410,9 @@ CSV: `logs/wind_transition_20260820_235946_n40_seed777.csv`(재수집 최종본,
 
 **남은 것**(우선순위 낮음, 미착수):
 - `TAU_FF_GAIN`을 물리 단위(N·m→정규화)로 정밀 캘리브레이션
-- correction_experiments 스크립트 중복 정리(12-21절 2번, 아직 미착수)
+- correction_experiments 스크립트 중복 정리 - `set_wind`/`EmaSmoother`/
+  `apply_deadband`/코렉터 클래스는 `correction_common.py`로 정리 완료(12-33절),
+  실비행 스팟체크와 텔레메트리/오프보드 보일러플레이트 정리는 아직 남음
 - 실제 하드웨어(Jetson + 컴패니언 컴퓨터)로 이관 — 지금까지는 SITL 위 단일 Python
   프로세스 구조. 순서: ①펌웨어를 실제 FC 타겟으로 재빌드 ②지상에서 통신·추론
   latency·모터 재캘리브레이션(Gazebo SDF 값은 실기와 다름) ③계류 비행(OFF→낮은
