@@ -284,12 +284,16 @@ async def run():
         await asyncio.sleep(WIND_SETTLE_S)
 
         next_log = time.monotonic()
+        last_sent_wind = (round(vx0, 3), round(vy0, 3))
         for i in range(n_steps):
             t = i * LOG_INTERVAL_S
             true_vx, true_vy, regime, t_since = wind_at(episode, t)
 
             if i % updates_per_log == 0:
-                await set_wind(true_vx, true_vy)
+                wind_key = (round(true_vx, 3), round(true_vy, 3))
+                if wind_key != last_sent_wind:
+                    await set_wind(true_vx, true_vy)
+                    last_sent_wind = wind_key
 
             north, east, down = latest_pv["north"], latest_pv["east"], latest_pv["down"]
             vn, ve, vd = latest_pv["vn"], latest_pv["ve"], latest_pv["vd"]
