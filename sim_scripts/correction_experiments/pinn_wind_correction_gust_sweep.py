@@ -49,9 +49,9 @@ GUST_CONDITIONS = [
     ("strong_gust", 8.0, 3.0, 0.6, 6.0),
     ("crosswind_gust", 0.0, 6.0, 0.6, 6.0),
 ]
-ACCEL_GAIN = 0.15  # 체계적 튜닝 스윕에서 0.20/deadband 조정을 시도했으나 전체 조건
-MAX_ACCEL_MPS2 = 2.0    # 기준으로는 원래 값이 더 균형 잡힌 것으로 확인됨 (12-8절 참고)
-WIND_DEADBAND_MPS = 1.0
+ACCEL_GAIN = 0.05  # 12-31절: 혼합 재학습 모델 기준 재스윕 결과 0.15는 default_fixed에서
+MAX_ACCEL_MPS2 = 2.0    # 이미 손해(-24.8%)였고 0.05가 default/strong 양쪽에서 최선으로 확인됨
+WIND_DEADBAND_MPS = 1.0  # deadband는 그대로 유지 - light_gust에서 여전히 최선(+26.1%, 12-31절)
 TRIAL_DURATION_S = 18.0  # period 6s * 3주기
 GUST_UPDATE_INTERVAL_S = 1.0
 CALM_SETTLE_S = 5.0   # 12-23절: 3.0으로는 반복측정 시 분산이 극심함(최대 20배) 확인, 5.0으로 상향

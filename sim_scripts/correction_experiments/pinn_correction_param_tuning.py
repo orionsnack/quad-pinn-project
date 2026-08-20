@@ -53,7 +53,7 @@ GAIN_PROBE_CONDITIONS = [
 DEADBAND_VALUES = [0.5, 1.0, 1.5, 2.0]
 ACCEL_GAIN_VALUES = [0.05, 0.10, 0.15, 0.20, 0.30]
 
-ACCEL_GAIN_DEFAULT = 0.15   # deadband 스윕 중 고정
+ACCEL_GAIN_DEFAULT = 0.05   # deadband 스윕 중 고정 (12-31절 재스윕 결과 반영)
 WIND_DEADBAND_DEFAULT = 1.0  # gain 스윕 중 고정
 MAX_ACCEL_MPS2 = 2.0
 
@@ -305,11 +305,15 @@ async def run():
         peak_error = 0.0
         max_roll, max_pitch = 0.0, 0.0
 
+        last_sent_wind = None
         for i in range(n_steps):
             t = i * LOG_INTERVAL_S
             true_vx, true_vy = wind_at(cond, t)
             if i % updates_per_log == 0:
-                await set_wind(true_vx, true_vy)
+                wind_key = (round(true_vx, 3), round(true_vy, 3))
+                if wind_key != last_sent_wind:
+                    await set_wind(true_vx, true_vy)
+                    last_sent_wind = wind_key
 
             north, east = latest_pv["north"], latest_pv["east"]
             vn, ve = latest_pv["vn"], latest_pv["ve"]

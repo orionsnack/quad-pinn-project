@@ -43,9 +43,9 @@ WIND_CONDITIONS = [
     ("strong", 8.0, 3.0),
     ("crosswind", 0.0, 6.0),
 ]
-ACCEL_GAIN = 0.15  # 체계적 튜닝 스윕에서 0.20/deadband 조정을 시도했으나 전체 조건
-MAX_ACCEL_MPS2 = 2.0    # 기준으로는 원래 값이 더 균형 잡힌 것으로 확인됨 (12-8절 참고)
-WIND_DEADBAND_MPS = 1.0  # calm에서 추정 잡음만으로 보정이 살짝 손해보던 문제 완화용
+ACCEL_GAIN = 0.05  # 12-31절: 혼합 재학습 모델(12-30절) 기준 재스윕 결과 0.15는
+MAX_ACCEL_MPS2 = 2.0    # default_fixed에서 이미 손해(-24.8%)였고 0.05가 default/strong
+WIND_DEADBAND_MPS = 1.0  # 양쪽에서 최선으로 확인됨. deadband는 그대로 유지(light_gust 최선)
 
 # 적응형 게인 (2026-08-17 추가, EXPERIMENTS.md 12-8/12-20절): 12-8절에서 단일
 # ACCEL_GAIN 상수로는 "강풍 개선하려고 올리면 무풍/약풍이 나빠지는" 트레이드오프가
