@@ -17,12 +17,15 @@ import argparse
 import asyncio
 import csv
 import datetime
+import math
+import random
 import sys
 import time
 from pathlib import Path
 
 import torch
 from mavsdk import System
+from mavsdk.mavlink_direct import MavlinkMessage
 from mavsdk.offboard import (OffboardError, PositionNedYaw, VelocityNedYaw, AccelerationNed)
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "offline_training"))
@@ -69,6 +72,37 @@ SEND_RATE_HZ = 20.0
 SEND_PERIOD_S = 1.0 / SEND_RATE_HZ
 
 MODEL_PATH = Path(__file__).parent.parent.parent / "offline_training" / "wind_estimator.pt"
+
+# 12-28절: 배포 모델이 더더링(무작위 토크 주입) 있는 자이로 신호 특성에 암묵적으로
+# 의존한다는 게 확인됨 - 실비행(이 스크립트) 중엔 더더링을 전혀 안 쓰고 있었음.
+# --dither로 wind_random_dither_sweep.py와 동일한 OU 프로세스를 켤 수 있게 함
+# (기본 False, 기존 동작 불변) - "학습 조건과 똑같이 맞추면 개선율이 달라지는가"
+# 진단용. TAU_FF DEBUG_VECT 채널을 씀 - 회전 피드포워드(pinn_rotation_correction_test.py)
+# 와 동시에 쓰면 채널이 충돌하니 같이 켜지 말 것.
+DITHER_TAU_S = 0.3
+DITHER_SIGMA = 0.10
+DITHER_CLAMP = 0.15
+DITHER_RATE_HZ = 20.0
+DITHER_PERIOD_S = 1.0 / DITHER_RATE_HZ
+
+
+class OUDither:
+    """wind_random_dither_sweep.py와 동일한 Ornstein-Uhlenbeck 프로세스."""
+
+    def __init__(self, rng, tau_s=DITHER_TAU_S, sigma=DITHER_SIGMA, dt=DITHER_PERIOD_S):
+        self.rng = rng
+        self.alpha = dt / (tau_s + dt)
+        self.noise_scale = sigma * math.sqrt(2 * dt / tau_s)
+        self.value = 0.0
+
+    def step(self):
+        self.value += -self.alpha * self.value + self.noise_scale * self.rng.gauss(0.0, 1.0)
+        self.value = max(-DITHER_CLAMP, min(DITHER_CLAMP, self.value))
+        return self.value
+
+
+USE_DITHER = False   # --dither로 켬 (기본 False, 기존 동작 불변)
+DITHER_SEED = 12345
 
 
 async def set_wind(vx, vy, vz=0.0):
@@ -230,6 +264,31 @@ async def run():
     gyro_task = asyncio.create_task(gyro_monitor())
     while latest_gyro["wx"] is None:
         await asyncio.sleep(0.05)
+
+    dither_task = None
+    if USE_DITHER:
+        dither_rng = random.Random(DITHER_SEED)
+        dither = {"x": OUDither(dither_rng), "y": OUDither(dither_rng), "z": OUDither(dither_rng)}
+
+        async def dither_sender():
+            while True:
+                dx, dy, dz = dither["x"].step(), dither["y"].step(), dither["z"].step()
+                msg = MavlinkMessage(
+                    message_name="DEBUG_VECT", system_id=0, component_id=0,
+                    target_system_id=0, target_component_id=0,
+                    fields_json=(
+                        '{"name": "TAU_FF", "time_usec": 0, '
+                        f'"x": {dx:.4f}, "y": {dy:.4f}, "z": {dz:.4f}}}'
+                    ),
+                )
+                try:
+                    await drone.mavlink_direct.send_message(msg)
+                except Exception as exc:
+                    print(f"  [!!! dither_sender 예외] {type(exc).__name__}: {exc}")
+                await asyncio.sleep(DITHER_PERIOD_S)
+
+        dither_task = asyncio.create_task(dither_sender())
+        print(f"  더더링 켬: OU tau={DITHER_TAU_S}s sigma={DITHER_SIGMA} clamp=±{DITHER_CLAMP}")
 
     nominal = {"north": latest_pv["north"], "east": latest_pv["east"],
                "down": latest_pv["down"], "yaw": latest_att["yaw"]}
@@ -409,9 +468,10 @@ async def run():
 
     await set_wind(5.0, 2.0)
 
-    for task in (sender_task, pv_task, att_task, gyro_task):
+    cleanup_tasks = (sender_task, pv_task, att_task, gyro_task) + ((dither_task,) if dither_task else ())
+    for task in cleanup_tasks:
         task.cancel()
-    for task in (sender_task, pv_task, att_task, gyro_task):
+    for task in cleanup_tasks:
         try:
             await task
         except asyncio.CancelledError:
@@ -440,7 +500,13 @@ if __name__ == "__main__":
                          help="조건 전환 시 무풍 안정화 대기 시간(초) - 12-22절 분산 원인 실험용")
     parser.add_argument("--phase-gap-s", type=float, default=PHASE_GAP_S,
                          help="OFF/ON phase 사이 대기 시간(초) - 12-22절 분산 원인 실험용")
+    parser.add_argument("--dither", action="store_true",
+                         help="실비행 중에도 학습 때와 같은 더더링(OU 토크 주입)을 켬 - "
+                              "12-28절 진단용, 회전 피드포워드와 동시 사용 금지(채널 충돌)")
+    parser.add_argument("--dither-seed", type=int, default=DITHER_SEED)
     args = parser.parse_args()
     CALM_SETTLE_S = args.calm_settle_s
     PHASE_GAP_S = args.phase_gap_s
+    USE_DITHER = args.dither
+    DITHER_SEED = args.dither_seed
     asyncio.run(run())
