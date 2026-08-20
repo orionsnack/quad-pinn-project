@@ -12,6 +12,7 @@ Neural Network)을 학습시키고, 그 추정치를 실제 비행 제어 루프
 | [STRUCTURE.md](STRUCTURE.md) | 파이프라인/제어루프/모델 구조를 그림으로 정리한 개요도 |
 | [USAGE.md](USAGE.md) | 파일별 실행 방법 (무슨 옵션, 어디에 저장되는지) |
 | [EXPERIMENTS.md](EXPERIMENTS.md) | 실험 상세 기록 (설계 이유, 실패한 시도, 근거 있는 결론) |
+| [CAPSTONE_REPORT_DRAFT.md](CAPSTONE_REPORT_DRAFT.md) | 캡스톤 보고서용 결과 정리 초안 (33개 실험 절을 서론/방법론/결과/교훈으로 재구성) |
 | [setup_guide.md](setup_guide.md) | 환경 재현 가이드 + 트러블슈팅 |
 | [RAMPNET_ROADMAP.md](RAMPNET_ROADMAP.md) | RAMP-Net 완전 재현 시 실행 순서 로드맵 (현재 스코프 밖, 계획 문서) |
 
@@ -199,6 +200,7 @@ figures/                  수집 실행별(시간+조건명) 폴더에 정리된
   프로세스 구조. 순서: ①펌웨어를 실제 FC 타겟으로 재빌드 ②지상에서 통신·추론
   latency·모터 재캘리브레이션(Gazebo SDF 값은 실기와 다름) 확인 ③계류 비행(OFF→
   낮은 gain ON) ④자유비행 점진 확대
-- 캡스톤 보고서용 결과 정리/시각화
+- 캡스톤 보고서용 결과 정리/시각화 — 텍스트 초안은 작성됨([CAPSTONE_REPORT_DRAFT.md](CAPSTONE_REPORT_DRAFT.md)),
+  그래프/표 시각화는 아직
 
 (상세 내용 및 근거는 [EXPERIMENTS.md](EXPERIMENTS.md) 참고)
