@@ -42,6 +42,14 @@ BOOT_WAIT_S=15
 START_SESSION=1
 MAX_RETRIES=3
 EPISODE_DURATION_S=20.0
+PER_EPISODE_OVERHEAD_S=2.0    # gz topic pub spawn당 오버헤드 등 - 관측된 실제 페이스가
+                               # 예상보다 훨씬 느릴 때(2026-08-21 새벽, ~90s/조건 관측 -
+                               # 원래 가정 22s의 4배) --per-episode-overhead-s로 올려서
+                               # SESSION_TIMEOUT_S를 현실적으로 재계산할 것. 이 값을 안
+                               # 올리면 세션이 실제 완료 전에 항상 강제종료→처음부터
+                               # 재시도를 반복하며 데이터를 통째로 날림(세션 크기를
+                               # 줄여도 타임아웃도 같이 줄어들어서 비율이 안 바뀜).
+SESSION_TIMEOUT_OVERRIDE_S=""  # 직접 초 단위로 지정하고 싶으면 --session-timeout-s
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -51,6 +59,8 @@ while [[ $# -gt 0 ]]; do
         --seed-base) SEED_BASE="$2"; shift 2 ;;
         --start-session) START_SESSION="$2"; shift 2 ;;
         --episode-duration) EPISODE_DURATION_S="$2"; shift 2 ;;
+        --per-episode-overhead-s) PER_EPISODE_OVERHEAD_S="$2"; shift 2 ;;
+        --session-timeout-s) SESSION_TIMEOUT_OVERRIDE_S="$2"; shift 2 ;;
         *) echo "알 수 없는 옵션: $1"; exit 1 ;;
     esac
 done
@@ -58,10 +68,14 @@ done
 TOTAL_PER_SESSION=$((N_YAW * N_PER_YAW))
 COMBINED_YAW_POINTS=$((N_YAW * SESSIONS))
 COMBINED_YAW_STEP=$(awk -v n="$COMBINED_YAW_POINTS" 'BEGIN{printf "%.2f", 360.0/n}')
-EST_HOURS=$(awk -v ny="$N_YAW" -v npy="$N_PER_YAW" -v ed="$EPISODE_DURATION_S" -v s="$SESSIONS" \
-    'BEGIN{cond_s=ny*npy*(ed+2); rot_s=ny*4; overhead_s=120; total=(cond_s+rot_s+overhead_s)*s; printf "%.1f", total/3600}')
-SESSION_TIMEOUT_S=$(awk -v ny="$N_YAW" -v npy="$N_PER_YAW" -v ed="$EPISODE_DURATION_S" \
-    'BEGIN{cond_s=ny*npy*(ed+2); rot_s=ny*4; overhead_s=120; printf "%d", (cond_s+rot_s+overhead_s)*1.3}')
+EST_HOURS=$(awk -v ny="$N_YAW" -v npy="$N_PER_YAW" -v ed="$EPISODE_DURATION_S" -v ov="$PER_EPISODE_OVERHEAD_S" -v s="$SESSIONS" \
+    'BEGIN{cond_s=ny*npy*(ed+ov); rot_s=ny*4; overhead_s=120; total=(cond_s+rot_s+overhead_s)*s; printf "%.1f", total/3600}')
+if [[ -n "$SESSION_TIMEOUT_OVERRIDE_S" ]]; then
+    SESSION_TIMEOUT_S="$SESSION_TIMEOUT_OVERRIDE_S"
+else
+    SESSION_TIMEOUT_S=$(awk -v ny="$N_YAW" -v npy="$N_PER_YAW" -v ed="$EPISODE_DURATION_S" -v ov="$PER_EPISODE_OVERHEAD_S" \
+        'BEGIN{cond_s=ny*npy*(ed+ov); rot_s=ny*4; overhead_s=120; printf "%d", (cond_s+rot_s+overhead_s)*1.3}')
+fi
 echo "=== 세션 ${SESSIONS}개, 세션당 yaw ${N_YAW} x 방향당 ${N_PER_YAW} = ${TOTAL_PER_SESSION}조건 (에피소드당 ${EPISODE_DURATION_S}초) ==="
 echo "=== 총 예상 조건 수: $((TOTAL_PER_SESSION * SESSIONS)) ==="
 echo "=== 세션들을 합친 yaw 해상도: ${COMBINED_YAW_POINTS}지점 (${COMBINED_YAW_STEP}도 간격) ==="
