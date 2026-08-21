@@ -1261,9 +1261,9 @@ roll/pitch가 급변하고 그 다음 틱과 완전히 동일한 값이 찍히�
    `wind_transition_sweep.py`로 재시도 가능(40에피소드 재수집, 이전엔 약 2시간
    소요됨)
 
-CSV: `logs/pinn_correction_param_tuning_20260820_222408.csv`(2차, WSL 재시작으로
-중단됨 - 참고용), `logs/pinn_correction_param_tuning_20260820_224443.csv`(3차,
-최종 완주분).
+CSV: `logs/pinn_correction_param_tuning_20260820_214657.csv`(1차, 버그가 드러난
+원본 - 위 인용 수치의 출처), `logs/pinn_correction_param_tuning_20260820_224443.csv`
+(3차, 최종 완주분). (2차, WSL 재시작으로 중단된 참고용 사본은 정리 차원에서 삭제함.)
 
 ---
 
@@ -1324,8 +1324,7 @@ CSV: `logs/pinn_correction_param_tuning_20260820_222408.csv`(2차, WSL 재시작
 fixed→gust 방향도 깨끗하게 분리 가능하지만, 실익이 크지 않아 보류.
 
 CSV: `logs/wind_transition_20260820_235946_n40_seed777.csv`(재수집 최종본,
-40/40 완주), `logs/wind_transition_20260820_231638_n40_seed777.csv`(크래시로
-중단된 1차 시도, 에피소드 0 도중까지만 - 참고용).
+40/40 완주). (크래시로 에피소드 0 도중 끊긴 1차 시도 사본은 정리 차원에서 삭제함.)
 
 ---
 
