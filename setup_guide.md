@@ -179,18 +179,8 @@ cd ~/MyProjects/quad-pinn-project/sim_scripts
     ├── environment-px4sim.yml             # px4sim conda 환경 재현용 (7-1절)
     ├── environment-pinn_train.yml         # pinn_train conda 환경 재현용 (7-1절)
     ├── sim_scripts/                       # MAVSDK 테스트/실험 스크립트 (README 8절 참고)
-    │   ├── data_collection/               # PINN 학습용 데이터 수집
-    │   │   ├── wind_random_sweep.py
-    │   │   ├── wind_gust_sweep.py
-    │   │   ├── run_yaw_collection_sessions.sh
-    │   │   ├── watch_collection.sh
-    │   │   ├── wind_yaw_generalization_test.py
-    │   │   ├── plot_session_grid.py
-    │   │   └── plot_combined_summary.py
-    │   └── correction_experiments/        # PINN 보정 A/B·파라미터 튜닝
-    │       ├── pinn_wind_correction_sweep.py
-    │       ├── pinn_wind_correction_gust_sweep.py
-    │       └── pinn_correction_param_tuning.py
+    │   ├── data_collection/               # PINN 학습용 데이터 수집 (고정바람/더더링/gust/전환구간 + 오케스트레이션, 상세는 USAGE.md)
+    │   └── correction_experiments/        # PINN 보정 A/B·파라미터 튜닝·회전 피드포워드 (상세는 USAGE.md)
     ├── offline_training/                  # PINN 학습 파이프라인
     │   ├── wind_pinn_model.py
     │   ├── train_wind_estimator.py
@@ -259,9 +249,7 @@ cd ~/MyProjects/quad-pinn-project/sim_scripts
 | 같은 조건인데 A/B 테스트 결과가 이전 실행과 크게 다름(특히 calm 베이스라인이 갑자기 커짐) | EXPERIMENTS.md 12-8절에서 **단 1회** 관측됨(SITL 65분 연속 실행 후). "장시간 실행이 원인"이라는 건 검증 안 된 가설이지 확립된 규칙이 아님 — 재현 실험은 안 해봤음. 다만 이상하게 튀는 결과가 나오면 SITL을 재시작해서 재현되는지 확인해볼 가치는 있음 |
 | `make px4_sitl` 재구성 중 `kconfiglib is not installed` 에러, 심하면 `build/px4_sitl_default` 폴더 자체가 사라짐 | CMake가 Python3를 찾을 때 PATH상 `px4sim` conda 환경의 python을 잡는 경우가 있는데, 거기엔 PX4 빌드용 패키지(`kconfiglib` 등)가 없어서 재구성이 실패하며 빌드 폴더를 정리해버림. `environment-px4sim.yml`에 `PX4-Autopilot/Tools/setup/requirements.txt` 전체를 포함시켜 재발 방지함 (`conda env update -f environment-px4sim.yml`로 기존 환경에도 추가 가능) |
 | `HEADLESS=1 make px4_sitl ...`를 백그라운드로 오래 돌리면 출력 파일이 수 GB까지 불어남 | PX4의 `pxh>` 콘솔이 진짜 터미널이 아닌 파이프로 연결되면 프롬프트를 계속 지우고 다시 그리는(ANSI escape) 동작을 무한 반복하는 것뿐 — SITL 자체는 정상 동작. 출력을 `> /dev/null 2>&1`로 버리고 백그라운드로 띄우면 문제없음 |
-| `run_yaw_collection_sessions.sh` 세션이 원인 불명으로 계속 멈춤(연결은 되는데 GPS/홈 위치 확인에서 안 넘어감) | `~/MyProjects/PX4-Autopilot/build/px4_sitl_default/rootfs/parameters.bson`(자기장 캘리브레이션 등)이 오염됐을 가능성이 1순위 의심 대상 — 지우면(또는 이름 바꿔 백업하면) PX4가 기본값으로 새로 만듦. 세션 사이 `pkill -9`로 강제종료를 반복하는 구조라 이 파일이 가끔 깨지는 것으로 추정됨 (2026-08-08 밤 실제로 이걸로 세션 7이 계속 멈췄었음) |
-| 위 `parameters.bson` 삭제로도(옛 파일 그대로 둔 채 재시도만 반복한 경우) GPS/홈 위치 확인이 영영 안 넘어감(raw GPS는 정상인데 `ESTIMATOR_STATUS.flags`가 `ESTIMATOR_CONST_POS_MODE`에 고착 — EKF2가 GPS를 영구히 안 믿는 상태, 180초 기다려도 그대로) | 결국 이것도 `parameters.bson` 오염이 원인. "클린 재빌드가 해결책"으로 한 번 오진단했으나, 재빌드가 parameters.bson을 부수적으로 지우는 효과였을 뿐 — 재빌드 없이 **`mv rootfs/parameters.bson rootfs/parameters.bson.bak && mv rootfs/parameters_backup.bson rootfs/parameters_backup.bson.bak` 후 재시작**만으로도 즉시 해결됨(PX4 소스를 원본으로 되돌려도 재현되는 대조실험으로 코드 문제가 아님도 확인). 클린 재빌드(10분+)는 과잉 대응. 예방책: SITL을 불필요하게 반복 `kill -9`하지 말 것 |
-| `run_yaw_collection_dither_sessions.sh`(회전 토크 더더링 수집)가 무보정 버전보다 훨씬 빨리(단 2세션 만에) 같은 증상 재발 | 이 버전은 세션마다 MAVLink DEBUG_VECT를 20Hz로 계속 쏘다가 매 세션 끝에 `kill -9`로 죽는 구조라(무보정 버전엔 없던 채널) parameters.bson이 더 빨리 깨지는 것으로 추정됨(2026-08-16). 반응적으로 고치는 대신 `restart_sitl()`이 **매 세션 재시작마다 예방적으로 parameters.bson을 삭제**하도록 고쳐서 해결 — 리셋 비용은 거의 없고(기본값으로 곧장 GPS 수 초 내 잠김) 적용 후 세션 4~15 전부 재시도 없이 1회 시도로 성공함 |
-| `run_yaw_collection_sessions.sh`/`wind_*_sweep.py` 등 SITL을 직접 껐다 켜는 스크립트를 실수로 두 번 동시 실행 | SITL/포트를 두 프로세스가 나눠 쓰면서 서로 충돌함. 재시작 전엔 항상 `pgrep -af "run_yaw_collection_sessions.sh"`(또는 해당 스크립트 이름)로 이미 떠 있는 게 없는지 확인할 것 |
-| MAVSDK 스크립트가 예외를 던지고 트레이스백까지 찍혔는데 프로세스가 안 죽고 계속 살아있음(`ps`로 확인됨) | `asyncio.run()` 내부에서 mavsdk_server/grpc 채널 정리가 멈춰서 인터프리터 종료 자체가 안 되는 경우가 있음. 데이터 수집 스크립트들(`wind_random_sweep.py`, `wind_gust_sweep.py`)은 `__main__`에서 `os._exit()`로 강제 종료하도록 이미 고쳐놨지만, `sim_scripts/correction_experiments/`의 스크립트들은 아직 이 처리가 없음 — 오래 걸리는 실험은 항상 `timeout -k 15 <Ns> python ...`처럼 OS 레벨 타임아웃으로 감싸서 실행할 것 |
-| 이렇게 강제 종료된 뒤 다음 실행에서 `arm(): COMMAND_DENIED`로 arm이 거부됨 | 죽은 MAVSDK 클라이언트가 남긴 `mavsdk_server` 좀비 프로세스가 포트(기본 50051)를 계속 물고 있어서 다음 연결이 꼬이는 것으로 보임. `pgrep -af "px4|gz sim|mavsdk_server"`로 남은 프로세스를 exact PID로 정리하고 SITL을 완전히 재시작하면 해결됨 |
+| 세션형 수집 스크립트가 원인 불명으로 계속 멈춤(연결은 되는데 GPS/홈 위치 확인에서 안 넘어감) | `rootfs/parameters.bson` 오염이 1순위 의심 대상(세션 사이 `pkill -9` 반복으로 가끔 깨짐) — `mv rootfs/parameters.bson{,.bak}` 후 재시작하면 기본값으로 새로 만듦. 예방책: `restart_sitl()`이 매 세션 재시작마다 예방적으로 삭제하도록 이미 반영해둠. 그래도 안 풀리면 `make distclean` + 완전 재빌드(10~25분, SITL을 너무 많이 반복 재시작해서 빌드 자체가 손상된 경우 — 12-16/12-30/12-34절에서 반복 확인됨) |
+| SITL을 직접 껐다 켜는 스크립트를 실수로 두 번 동시 실행 | SITL/포트 충돌. 재시작 전 `pgrep -af "<스크립트명>"`으로 이미 떠 있는지 확인 |
+| MAVSDK 스크립트가 예외/트레이스백 후에도 프로세스가 안 죽음 | `asyncio.run()` 내부 grpc 채널 정리가 멈추는 경우 있음 — 데이터 수집 스크립트는 `os._exit()`로 이미 대응, 그 외는 `timeout -k 15 <Ns> python ...`로 OS 레벨 타임아웃 감쌀 것 |
+| 강제 종료 후 다음 실행에서 `arm(): COMMAND_DENIED` | 죽은 `mavsdk_server` 좀비가 포트(50051)를 물고 있는 게 원인 — `pgrep -af "px4|gz sim|mavsdk_server"`로 정리 후 SITL 재시작 |
