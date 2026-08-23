@@ -1,0 +1,5 @@
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_054345.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_054538.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_054737.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_054933.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_055129.csv

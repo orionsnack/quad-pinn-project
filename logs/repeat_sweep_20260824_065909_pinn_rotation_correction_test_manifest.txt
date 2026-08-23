@@ -1,0 +1,10 @@
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_065949.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_070627.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_071309.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_071948.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_072628.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_073307.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_073947.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_074627.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_075307.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_rotation_correction_20260824_075948.csv
