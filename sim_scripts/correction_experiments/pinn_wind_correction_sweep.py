@@ -58,6 +58,11 @@ WIND_DEADBAND_MPS = 1.0  # 양쪽에서 최선으로 확인됨. deadband는 그�
 USE_ADAPTIVE_GAIN = "--adaptive" in sys.argv
 ACCEL_GAIN_MIN = 0.10   # deadband 통과 직후(약한 신호)엔 낮게 - 추정 잡음 과대반응 억제
 ACCEL_GAIN_MAX = 0.25   # 강풍에선 높게 - 12-8절 스윕 범위(0.05~0.30) 상단 근처
+# 주의(2026-08-24): 이 두 값 다 구모델(12-30절 이전) 기준 스윕에서 나온 값 - 지금
+# 고정 게인 기본값(12-31절)은 0.05로, MIN(0.10)보다도 낮음. 적응형 게인 자체가
+# 12-20절에서 고정값보다 나쁘다고 결론 나 --adaptive 없이는 안 쓰이지만, 만약
+# 다시 켠다면 이 상수들부터 새 모델 기준으로 재검증할 것 - 지금 상태로 켜면
+# 약풍에서 최적치(0.05)보다 무조건 더 큰 게인이 걸림.
 ADAPTIVE_GAIN_SPEED_LOW = WIND_DEADBAND_MPS   # 이 풍속 이하는 ACCEL_GAIN_MIN
 ADAPTIVE_GAIN_SPEED_HIGH = 8.0                # strong 조건 풍속 - 이 이상은 ACCEL_GAIN_MAX
 

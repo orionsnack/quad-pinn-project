@@ -30,7 +30,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_SCRIPT=""
 REPEATS=5
 BOOT_WAIT_S=15
-TIMEOUT_S=600
+# gust_sweep.py류(4조건)는 실측 12~13분(gz topic pub 1회당 ~3.5초, 조건당 18회
+# 호출) 걸림 - 600초는 부족해서 매번 exit 124로 실패함(EXPERIMENTS.md 12-36절
+# 실측). 900초로 올려서 기본값만으로도 안전하게 함 - 더 짧게 걸리는 스크립트
+# (예: 회전 테스트 단일조건)는 그냥 더 일찍 끝날 뿐이라 문제없음.
+TIMEOUT_S=900
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do

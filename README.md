@@ -12,7 +12,7 @@ Neural Network)을 학습시키고, 그 추정치를 실제 비행 제어 루프
 | [CAPSTONE_REPORT_DRAFT.md](CAPSTONE_REPORT_DRAFT.md) | 서론/방법론/결과/교훈으로 정리한 전체 서사 — 읽을거리는 여기 |
 | [STRUCTURE.md](STRUCTURE.md) | 파이프라인/제어루프/모델 구조 개요도 |
 | [USAGE.md](USAGE.md) | 파일별 실행 방법 |
-| [EXPERIMENTS.md](EXPERIMENTS.md) | 실험 상세 기록(35개 절) — 설계 이유·실패한 시도·근거 있는 결론, 모든 수치의 출처 |
+| [EXPERIMENTS.md](EXPERIMENTS.md) | 실험 상세 기록(40개 절) — 설계 이유·실패한 시도·근거 있는 결론, 모든 수치의 출처 |
 | [setup_guide.md](setup_guide.md) | 환경 재현 가이드 + 트러블슈팅 |
 | [RAMPNET_ROADMAP.md](RAMPNET_ROADMAP.md) | RAMP-Net(MPC) 완전 재현 시 로드맵 — 사전검증(0단계)까지 끝났으나 스코프 밖, 착수 안 함 |
 

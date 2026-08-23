@@ -1805,7 +1805,10 @@ CSV: `logs/pinn_rotation_correction_20260824_020638.csv`(gain=1.0 스팟체크).
 3. correction_experiments 텔레메트리/오프보드 보일러플레이트 중복 정리
 4. (낮은 우선순위) 미배포 gust 모델을 `ACCEL_GAIN`/`WIND_DEADBAND_MPS` 재튜닝
    기준으로 다시 시도해볼지 검토 (12-39) · `TAU_FF_GAIN` 노이즈 억제(스무딩 등)
-   후 물리값에 더 가깝게 갈 여지 탐색 (12-40)
+   후 물리값에 더 가깝게 갈 여지 탐색 (12-40) · `ACCEL_GAIN_MIN`/`MAX`(적응형
+   게인, `pinn_wind_correction_sweep.py --adaptive`)는 12-31절 재튜닝(0.15→0.05)
+   이후로 한 번도 재검증 안 됨 - 만들어만 두고 방치된 상태(12-8/20절에서 고정
+   게인보다 나쁘다고 결론 났던 것도 구모델 기준이라 재확인 필요)
 
 **교훈**: 학습 스크립트처럼 CPU를 많이 쓰는 작업은 SITL 비행 테스트와 동시에
 돌리지 말 것. SITL을 반복 재시작하면 GPS 락이 안 될 수 있음 — **이건 "빌드

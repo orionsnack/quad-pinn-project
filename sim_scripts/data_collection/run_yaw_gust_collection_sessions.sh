@@ -42,11 +42,13 @@ BOOT_WAIT_S=15
 START_SESSION=1
 MAX_RETRIES=3
 EPISODE_DURATION_S=20.0
-PER_EPISODE_OVERHEAD_S=2.0    # gz topic pub spawn당 오버헤드 등 - 관측된 실제 페이스가
-                               # 예상보다 훨씬 느릴 때(2026-08-21 새벽, ~90s/조건 관측 -
-                               # 원래 가정 22s의 4배) --per-episode-overhead-s로 올려서
-                               # SESSION_TIMEOUT_S를 현실적으로 재계산할 것. 이 값을 안
-                               # 올리면 세션이 실제 완료 전에 항상 강제종료→처음부터
+PER_EPISODE_OVERHEAD_S=70.0   # gz topic pub spawn당 오버헤드 등 - 원래 기본값 2.0은
+                               # 낙관적인 추정치였음. 2026-08-21 새벽 실측 페이스가
+                               # ~90s/조건(가정 22s의 4배)이었고, 그날 이후 여러 세션
+                               # 실측치도 이 값(70)에서 안정적으로 성공함 - 기본값
+                               # 자체를 여기로 올려서 --per-episode-overhead-s를
+                               # 매번 안 붙여도 되게 함. 그래도 이 값을 너무 낮게
+                               # 재정의하면 세션이 실제 완료 전에 항상 강제종료→처음부터
                                # 재시도를 반복하며 데이터를 통째로 날림(세션 크기를
                                # 줄여도 타임아웃도 같이 줄어들어서 비율이 안 바뀜).
 SESSION_TIMEOUT_OVERRIDE_S=""  # 직접 초 단위로 지정하고 싶으면 --session-timeout-s
