@@ -1,0 +1,10 @@
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260823_215857.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260823_220245.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260823_220632.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260823_221021.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260823_221410.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260823_221759.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260823_222148.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260823_222537.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260823_222924.csv
+/home/ssh2003/MyProjects/quad-pinn-project/logs/pinn_correction_gust_sweep_20260823_223313.csv

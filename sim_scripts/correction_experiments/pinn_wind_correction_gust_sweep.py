@@ -19,6 +19,7 @@ Gazebo에는 GUST_UPDATE_INTERVAL_S 간격으로만 갱신(계단식 근사, win
 (HEADLESS=1 make px4_sitl gz_x500_windy)
 """
 
+import argparse
 import asyncio
 import csv
 import datetime
@@ -371,4 +372,12 @@ async def run():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--condition", choices=[c[0] for c in GUST_CONDITIONS], default=None,
+                         help="지정하면 그 조건 하나만 도는(4개 전부가 아니라) 진단용 - "
+                              "12-36절 crosswind_gust 반복검증처럼 특정 조건만 여러 번 "
+                              "반복할 때 세션 하나를 짧게 유지하기 위함")
+    args = parser.parse_args()
+    if args.condition:
+        GUST_CONDITIONS = [c for c in GUST_CONDITIONS if c[0] == args.condition]
     asyncio.run(run())

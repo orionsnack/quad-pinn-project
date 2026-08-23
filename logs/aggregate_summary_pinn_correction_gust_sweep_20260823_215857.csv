@@ -1,0 +1,2 @@
+condition,n_runs,off_mean_m,on_mean_m,improvement_mean_pct,improvement_std_pct,improvement_min_pct,improvement_max_pct
+crosswind_gust,10,0.3295,0.3262,0.7597872005601649,6.900221404514235,-8.227848101265831,12.20930232558139
