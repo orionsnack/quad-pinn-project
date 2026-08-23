@@ -1,0 +1,2 @@
+condition,n_runs,off_mean_m,on_mean_m,improvement_mean_pct,improvement_std_pct,improvement_min_pct,improvement_max_pct
+light_gust,10,0.11850000000000001,0.1234,-4.743982363562058,17.23950874919114,-38.31775700934579,28.925619834710748
