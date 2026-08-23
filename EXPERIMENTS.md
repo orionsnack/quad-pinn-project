@@ -1668,7 +1668,11 @@ CSV: `logs/pinn_correction_gust_sweep_20260823_21*.csv`(crosswind_gust만 10회)
 5. correction_experiments 텔레메트리/오프보드 보일러플레이트 중복 정리
 
 **교훈**: 학습 스크립트처럼 CPU를 많이 쓰는 작업은 SITL 비행 테스트와 동시에
-돌리지 말 것. SITL을 반복 재시작하면 빌드가 손상돼 GPS 락이 안 될 수 있음 —
-`make distclean` + 재빌드로 해결(12-16, 12-30, 12-36, 그리고 여러 번 재발함).
+돌리지 말 것. SITL을 반복 재시작하면 GPS 락이 안 될 수 있음 — **이건 "빌드
+손상"이 아니라 `rootfs/parameters.bson`(런타임 설정 파일) 손상임**, `pkill -9`
+반복이 원인. `make distclean` + 재빌드(10~25분)로 "해결"돼 온 게 12-16/30/34/36절
+등에 반복 기록돼 있는데, 이건 재빌드가 부수적으로 이 파일도 같이 지워서 나는
+효과일 뿐 — 진짜 해결책은 `mv rootfs/parameters.bson{,.bak}` 후 재시작(즉시
+해결, setup_guide.md 참고). 다음에 이 증상 나오면 재빌드 전에 이것부터 시도할 것.
 `gust_sweep.py`류를 `repeat_sweep.sh`로 돌릴 땐 `gz topic pub` 1회 호출이 실측
 ~3.5초 걸리는 걸 감안해 `--timeout 900` 이상 지정할 것(기본 600초로는 부족, 12-36).
