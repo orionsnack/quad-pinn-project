@@ -99,6 +99,9 @@ SESSION_CSVS=()
 SESSION_PNGS=()
 
 restart_sitl() {
+    echo "  [SITL] MAVSDK로 정상 종료 시도 (parameters.bson 손상 예방, setup_guide.md 참고)..."
+    "$PX4SIM_PYTHON" "$PROJECT_DIR/sim_scripts/graceful_sitl_shutdown.py" --timeout 5 2>&1 | sed 's/^/    /'
+    sleep 1
     echo "  [SITL] 기존 프로세스 정리 중 (정상종료 시도)..."
     pkill -TERM -f "px4_sitl_default/bin/px4" 2>/dev/null
     pkill -TERM -f "gz sim" 2>/dev/null

@@ -58,6 +58,9 @@ if ! flock -n 200; then
 fi
 
 restart_sitl() {
+    echo "  [SITL] MAVSDK로 정상 종료 시도 (parameters.bson 손상 예방, setup_guide.md 참고)..."
+    "$PX4SIM_PYTHON" "$PROJECT_DIR/sim_scripts/graceful_sitl_shutdown.py" --timeout 5 2>&1 | sed 's/^/    /'
+    sleep 1
     echo "  [SITL] 정리 중..."
     # 주의: pkill -f는 이 스크립트를 실행 중인 셸 자신의 커맨드라인(예: 이 스크립트를
     # 호출한 상위 프로세스의 인자 목록에 스크립트 파일명이 그대로 노출되는 환경)까지
