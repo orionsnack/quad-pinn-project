@@ -30,7 +30,7 @@ from mavsdk.mavlink_direct import MavlinkMessage
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "offline_training"))
 from wind_pinn_model import FEATURES, yaw_decompose  # noqa: E402
 from correction_common import (  # noqa: E402
-    set_wind as _set_wind, PINNCorrector,
+    set_wind as _set_wind, PINNCorrector, EmaSmoother,
     connect_and_wait_ready, arm_and_takeoff, start_telemetry_monitors, start_offboard_hold,
 )
 
@@ -46,17 +46,26 @@ ALL_WIND_CONDITIONS = [
     ("strong", 8.0, 3.0),
     ("crosswind", 0.0, 6.0),
 ]
-# CLI: python pinn_rotation_correction_test.py [gain] [condition_label] [target_yaw_deg]
+# CLI: python pinn_rotation_correction_test.py [gain] [condition_label] [target_yaw_deg] [tau_smooth_s]
 # gain 기본값 0.2 (2026-08-16 스윕으로 확정 - EXPERIMENTS.md 12-17절): 1.0에서는
 # 3조건 다 손해/중립이었는데, 0.2로 낮추니 default +2.8%/+3.8%(재현됨), strong
 # +3.2%로 첫 순이익 확인. calm은 -4.5%지만 절대오차 0.036도로 노이즈 수준.
+# (2026-08-24 N=10 재검증에서 이 "첫 순이익"이 재현 안 됨이 드러났고 - 12-41 -
+# 게인 재스윕(12-42)으로도 못 고쳤음. tau_smooth_s는 그 후속 - 병진 스크립트는
+# 이미 추정치를 EmaSmoother로 스무딩한 뒤 게인을 곱하는데(0.4초 시상수), 회전은
+# 지금까지 모델 원시출력을 스무딩 없이 그대로 게인에 곱해왔음 - 노이즈가 게인만큼
+# 그대로 증폭된다는 12-40절 가설과 정확히 맞아떨어짐. 기본값 0.0초 = 스무딩 없음
+# (기존 동작과 완전히 동일, 하위호환) - 0보다 크면 그만큼 시상수로 스무딩.
+# 병진과 달리 회전은 수백ms 단위로 빠른 동역학이라(12-16절) 0.4초는 너무 느릴
+# 수 있음 - 짧은 시상수(0.1~0.2초)부터 탐색할 것.
 # target_yaw_deg 생략 시 SITL 스폰 시 yaw 그대로 사용 (지금까지 전부 이렇게
 # 테스트함) - 각속도(wx/wy/wz)는 body frame이라 이론상 yaw 종속성이 없어야
 # 하지만(wind_pinn_model.py 참고), 병진 쪽에서 실제로 yaw 의존성 버그가 있었던
 # 전례(12-10절)가 있어 다른 yaw에서도 gain=0.2가 유효한지 확인할 가치가 있음.
 TAU_FF_GAIN = float(sys.argv[1]) if len(sys.argv) > 1 else 0.2
 _cond_label = sys.argv[2] if len(sys.argv) > 2 else None
-TARGET_YAW_DEG = float(sys.argv[3]) if len(sys.argv) > 3 else None
+TARGET_YAW_DEG = float(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] != "" else None
+TAU_SMOOTH_S = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0
 WIND_CONDITIONS = (
     [c for c in ALL_WIND_CONDITIONS if c[0] == _cond_label] if _cond_label else ALL_WIND_CONDITIONS
 )
@@ -157,13 +166,19 @@ async def run():
     writer = csv.writer(csv_file)
     writer.writerow([
         "wind_label", "phase", "t_s", "tau_x", "tau_y", "tau_z",
+        "tau_x_raw", "tau_y_raw", "tau_z_raw",
         "tauff_x", "tauff_y", "tauff_z",
         "roll_deg", "pitch_deg", "wx_rad_s", "wy_rad_s",
     ])
     print(f"\nCSV 로그 저장 경로: {csv_path}")
+    if TAU_SMOOTH_S > 0:
+        print(f"  tau 추정치 EMA 스무딩: 시상수={TAU_SMOOTH_S}s")
 
     async def run_trial(wind_label, phase_name, use_correction):
         corrector.buffer.clear()
+        smoother_x = EmaSmoother(time_constant_s=TAU_SMOOTH_S, dt_s=LOG_INTERVAL_S)
+        smoother_y = EmaSmoother(time_constant_s=TAU_SMOOTH_S, dt_s=LOG_INTERVAL_S)
+        smoother_z = EmaSmoother(time_constant_s=TAU_SMOOTH_S, dt_s=LOG_INTERVAL_S)
         n_steps = int(TRIAL_DURATION_S / LOG_INTERVAL_S)
         next_log = time.monotonic()
         peak_att_error = 0.0
@@ -180,10 +195,14 @@ async def run():
                     "wx_rad_s": wx, "wy_rad_s": wy, "wz_rad_s": latest_gyro["wz"]}
             corrector.push_state([feat[f] for f in FEATURES])
 
+            tau_x_raw = tau_y_raw = tau_z_raw = 0.0
             tau_x = tau_y = tau_z = 0.0
             if use_correction and corrector.ready():
                 pred = corrector.predict_raw()
-                tau_x, tau_y, tau_z = pred[2].item(), pred[3].item(), pred[4].item()  # N*m
+                tau_x_raw, tau_y_raw, tau_z_raw = pred[2].item(), pred[3].item(), pred[4].item()  # N*m
+                tau_x = smoother_x.update(tau_x_raw)
+                tau_y = smoother_y.update(tau_y_raw)
+                tau_z = smoother_z.update(tau_z_raw)
                 ff_x = max(-MAX_TAU_FF, min(MAX_TAU_FF, -TAU_FF_GAIN * tau_x))
                 ff_y = max(-MAX_TAU_FF, min(MAX_TAU_FF, -TAU_FF_GAIN * tau_y))
                 ff_z = max(-MAX_TAU_FF, min(MAX_TAU_FF, -TAU_FF_GAIN * tau_z))
@@ -198,6 +217,7 @@ async def run():
 
             writer.writerow([
                 wind_label, phase_name, f"{t:.2f}", f"{tau_x:.4f}", f"{tau_y:.4f}", f"{tau_z:.4f}",
+                f"{tau_x_raw:.4f}", f"{tau_y_raw:.4f}", f"{tau_z_raw:.4f}",
                 f"{current_tauff['x']:.3f}", f"{current_tauff['y']:.3f}", f"{current_tauff['z']:.3f}",
                 f"{roll:.3f}", f"{pitch:.3f}", f"{wx:.4f}", f"{wy:.4f}",
             ])
