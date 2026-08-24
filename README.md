@@ -12,7 +12,7 @@ Neural Network)을 학습시키고, 그 추정치를 실제 비행 제어 루프
 | [CAPSTONE_REPORT_DRAFT.md](CAPSTONE_REPORT_DRAFT.md) | 서론/방법론/결과/교훈으로 정리한 전체 서사 — 읽을거리는 여기 |
 | [STRUCTURE.md](STRUCTURE.md) | 파이프라인/제어루프/모델 구조 개요도 |
 | [USAGE.md](USAGE.md) | 파일별 실행 방법 |
-| [EXPERIMENTS.md](EXPERIMENTS.md) | 실험 상세 기록(42개 절) — 설계 이유·실패한 시도·근거 있는 결론, 모든 수치의 출처 |
+| [EXPERIMENTS.md](EXPERIMENTS.md) | 실험 상세 기록(43개 절) — 설계 이유·실패한 시도·근거 있는 결론, 모든 수치의 출처 |
 | [setup_guide.md](setup_guide.md) | 환경 재현 가이드 + 트러블슈팅 |
 | [RAMPNET_ROADMAP.md](RAMPNET_ROADMAP.md) | RAMP-Net(MPC) 완전 재현 시 로드맵 — 사전검증(0단계)까지 끝났으나 스코프 밖, 착수 안 함 |
 
@@ -93,12 +93,17 @@ A/B에 표본이 부족했던 것으로 결론. 원본(12-30절) 모델 유지, 
 default는 여전히 확실한 손해(-3.1%±2.8%). 회전 피드포워드는 게인 튜닝만으로는
 안 풀리는 것으로 보이며, **현재 미해결 상태로 배포 보류**.
 
+**correction_experiments 텔레메트리/오프보드 진입부 보일러플레이트 정리도 완료.**
+4개 스크립트에 복붙돼있던 "연결·GPS확인, arm+이륙, pv/att/gyro 모니터, 초기
+offboard 진입" 블록을 `correction_common.py`로 통합(4개 파일 총 328줄 삭제) —
+SITL에서 회전/병진 스크립트 각 1회씩 완주시켜 동작 동일함 확인. 실제 가속도/토크를
+흘려보내는 송신 루프 자체는 스크립트마다 달라 그대로 둠(EXPERIMENTS.md 12-43절).
+
 **남은 것(우선순위순)**:
 1. 회전 추정치 노이즈를 줄이는 접근(스무딩 등) 탐색 — 게인만으로는 못 풀었으니
    다음 단계는 추정 품질 쪽 (EXPERIMENTS.md 12-42 "다음에 볼 것")
 2. 실제 하드웨어(Jetson) 이관 — 펌웨어 재빌드 → 지상 통신/모터 재캘리브레이션 →
    계류비행 → 자유비행 순
 3. 캡스톤 보고서 그래프/표 시각화(텍스트 초안은 완료)
-4. correction_experiments 텔레메트리/오프보드 보일러플레이트 중복 정리(공통 유틸은 완료)
 
 **완료된 것 전체 목록**은 [EXPERIMENTS.md](EXPERIMENTS.md) 맨 아래 "다음 단계" 절 참고.

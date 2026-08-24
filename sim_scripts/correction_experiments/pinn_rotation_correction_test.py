@@ -29,7 +29,10 @@ from mavsdk.mavlink_direct import MavlinkMessage
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "offline_training"))
 from wind_pinn_model import FEATURES, yaw_decompose  # noqa: E402
-from correction_common import set_wind as _set_wind, PINNCorrector  # noqa: E402
+from correction_common import (  # noqa: E402
+    set_wind as _set_wind, PINNCorrector,
+    connect_and_wait_ready, arm_and_takeoff, start_telemetry_monitors, start_offboard_hold,
+)
 
 WORLD_NAME = "windy"
 set_wind = functools.partial(_set_wind, WORLD_NAME)
@@ -82,18 +85,7 @@ MODEL_PATH = Path(__file__).parent.parent.parent / "offline_training" / "wind_es
 async def run():
     drone = System()
 
-    print("PX4 SITL에 연결 시도 중...")
-    await drone.connect(system_address="udpin://0.0.0.0:14540")
-    async for state in drone.core.connection_state():
-        if state.is_connected:
-            print("-> 드론에 연결됨!")
-            break
-
-    print("GPS/홈 위치 확인 중...")
-    async for health in drone.telemetry.health():
-        if health.is_global_position_ok and health.is_home_position_ok:
-            print("-> 전역 위치 및 홈 위치 준비 완료")
-            break
+    await connect_and_wait_ready(drone)
 
     print(f"\n모델 로드: {MODEL_PATH}")
     corrector = PINNCorrector(MODEL_PATH)
@@ -101,63 +93,11 @@ async def run():
 
     await set_wind(0.0, 0.0)
 
-    print("\n--- Arming ---")
-    await drone.action.arm()
-    print("\n--- Takeoff ---")
-    await drone.action.takeoff()
-
-    t_start = time.monotonic()
-    reached_altitude = False
-    async for position in drone.telemetry.position():
-        if position.relative_altitude_m >= SAFE_ALTITUDE_M:
-            print(f"  -> 안전 고도 도달 ({position.relative_altitude_m:.2f}m)")
-            reached_altitude = True
-            break
-        if time.monotonic() - t_start > TAKEOFF_TIMEOUT_S:
-            print(f"  [경고] {TAKEOFF_TIMEOUT_S:.0f}초 내에 안전 고도 미도달.")
-            break
-    if not reached_altitude:
-        await drone.action.land()
+    if not await arm_and_takeoff(drone, SAFE_ALTITUDE_M, TAKEOFF_TIMEOUT_S):
         return
 
-    latest_pv = {"north": None, "east": None, "down": None, "vn": None, "ve": None, "vd": None}
-
-    async def pv_monitor():
-        async for pv in drone.telemetry.position_velocity_ned():
-            latest_pv["north"] = pv.position.north_m
-            latest_pv["east"] = pv.position.east_m
-            latest_pv["down"] = pv.position.down_m
-            latest_pv["vn"] = pv.velocity.north_m_s
-            latest_pv["ve"] = pv.velocity.east_m_s
-            latest_pv["vd"] = pv.velocity.down_m_s
-
-    pv_task = asyncio.create_task(pv_monitor())
-    while latest_pv["north"] is None:
-        await asyncio.sleep(0.05)
-
-    latest_att = {"roll": None, "pitch": None, "yaw": None}
-
-    async def att_monitor():
-        async for a in drone.telemetry.attitude_euler():
-            latest_att["roll"] = a.roll_deg
-            latest_att["pitch"] = a.pitch_deg
-            latest_att["yaw"] = a.yaw_deg
-
-    att_task = asyncio.create_task(att_monitor())
-    while latest_att["roll"] is None:
-        await asyncio.sleep(0.05)
-
-    latest_gyro = {"wx": None, "wy": None, "wz": None}
-
-    async def gyro_monitor():
-        async for av in drone.telemetry.attitude_angular_velocity_body():
-            latest_gyro["wx"] = av.roll_rad_s
-            latest_gyro["wy"] = av.pitch_rad_s
-            latest_gyro["wz"] = av.yaw_rad_s
-
-    gyro_task = asyncio.create_task(gyro_monitor())
-    while latest_gyro["wx"] is None:
-        await asyncio.sleep(0.05)
+    latest_pv, latest_att, latest_gyro, pv_task, att_task, gyro_task = \
+        await start_telemetry_monitors(drone)
 
     nominal = {"north": latest_pv["north"], "east": latest_pv["east"],
                "down": latest_pv["down"], "yaw": latest_att["yaw"]}
@@ -175,16 +115,7 @@ async def run():
             await asyncio.sleep(SEND_PERIOD_S)
 
     print("\n--- Offboard 진입 준비 ---")
-    await drone.offboard.set_position_velocity_acceleration_ned(
-        PositionNedYaw(nominal["north"], nominal["east"], nominal["down"], nominal["yaw"]),
-        VelocityNedYaw(0.0, 0.0, 0.0, nominal["yaw"]),
-        AccelerationNed(0.0, 0.0, 0.0),
-    )
-    try:
-        await drone.offboard.start()
-    except OffboardError as error:
-        print(f"Offboard 시작 실패: {error._result.result}")
-        await drone.action.land()
+    if not await start_offboard_hold(drone, nominal):
         return
 
     sender_task = asyncio.create_task(offboard_sender())

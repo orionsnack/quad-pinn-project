@@ -1903,6 +1903,47 @@ pinn_rotation_correction_test.py --repeats 5 --timeout 300 -- <gain> <condition>
 
 ---
 
+## 12-43. correction_experiments 텔레메트리/오프보드 진입부 보일러플레이트 정리 (2026-08-24)
+
+**배경**: 12-33절에서 `set_wind()`/`PINNCorrector`/`EmaSmoother`/`apply_deadband`를
+`correction_common.py`로 통합할 때, "텔레메트리 모니터·오프보드 송신 보일러플레이트"는
+스크립트마다 페이로드가 달라 위험 대비 이득이 작다고 보고 일부러 안 건드렸었음
+(README/EXPERIMENTS.md "남은 것" 목록에 계속 남아있던 항목). 이번에 4개 스크립트를
+다시 비교해보니, "페이로드가 다른" 부분(가속도/토크를 실제로 흘려보내는
+`offboard_sender` 루프 자체)과 "완전히 동일한" 부분(연결·GPS확인, arm+이륙,
+pv/att/gyro 모니터, 초기 offboard 진입)이 섞여 있었다는 걸 재확인 — 후자만 골라서
+정리.
+
+**작업**: `correction_common.py`에 4개 함수 추가:
+- `connect_and_wait_ready(drone)` — SITL 연결 + GPS/홈 위치 확인
+- `arm_and_takeoff(drone, safe_altitude_m, takeoff_timeout_s)` — arm+이륙+고도
+  대기, 타임아웃 시 착륙 후 False
+- `start_telemetry_monitors(drone)` — pv/att/gyro 모니터 태스크 3개 시작 + 첫 값
+  대기, `(latest_pv, latest_att, latest_gyro, pv_task, att_task, gyro_task)` 반환
+- `start_offboard_hold(drone, nominal)` — 현재 위치로 offboard 진입, 실패 시
+  착륙 후 False
+
+4개 스크립트(`pinn_wind_correction_sweep.py`, `pinn_wind_correction_gust_sweep.py`,
+`pinn_correction_param_tuning.py`, `pinn_rotation_correction_test.py`) 전부 이
+함수들을 쓰도록 교체 — 순수 리팩터링, 판정 로직·타이밍·CSV 데이터는 전부 동일.
+회전 스크립트는 원래 다른 3개보다 print 문구가 약간 간략했던 부분(예: "-> Armed",
+"안전 고도 도달 대기 중..." 줄 없음)이 있었는데, 이번에 더 자세한 쪽으로
+통일함 — 콘솔 로그 문구만 살짝 달라지고 동작은 동일. `offboard_sender` 루프
+자체(실제 가속도/토크 송신, 더더링, 적응형 게인)는 스크립트마다 여전히 달라
+그대로 둠.
+
+4개 스크립트 총 328줄 삭제, `correction_common.py`에 145줄 추가 — 순감소 183줄.
+
+**검증**: SITL에서 두 스크립트를 실제로 돌려 확인 — `pinn_rotation_correction_test.py`
+(gain=0.10, calm 단일조건, 개선율 -3.6%로 정상 범위) 및
+`pinn_wind_correction_sweep.py`(5조건 전체, 4/5 개선, 송신 간격 통계 정상
+50.0ms±4.5ms) 둘 다 연결→GPS확인→arm→이륙→모니터→offboard진입→트라이얼→착륙까지
+에러 없이 완주. 나머지 2개 스크립트(`pinn_wind_correction_gust_sweep.py`,
+`pinn_correction_param_tuning.py`)는 똑같은 공유 함수를 그대로 호출하는 구조라
+별도 실행 검증은 생략(리스크 낮음으로 판단).
+
+---
+
 ## 다음 단계
 
 전체 서사는 [CAPSTONE_REPORT_DRAFT.md](CAPSTONE_REPORT_DRAFT.md) 참고. 아래는 절
@@ -1946,12 +1987,16 @@ pinn_rotation_correction_test.py --repeats 5 --timeout 300 -- <gain> <condition>
   crosswind 순이익 확대)됐지만 **default는 여전히 확실한 손해**(-3.1%±2.8%) —
   스윕 범위 안에 "배포할 만한 값"은 없었음. 회전 피드포워드는 게인 튜닝만으로는
   해결 안 되는 것으로 잠정 결론, **미해결 상태로 배포 보류** (12-42)
+- correction_experiments 4개 스크립트의 텔레메트리/오프보드 진입부 보일러플레이트
+  (연결·GPS확인, arm+이륙, pv/att/gyro 모니터, 초기 offboard 진입) `correction_common.py`로
+  통합 완료 - 4개 파일 총 328줄 삭제, SITL 실행으로 검증(회전/병진 각 1회 완주,
+  결과 정상 범위). 실제 바람/토크를 흘려보내는 `offboard_sender` 루프 자체는
+  스크립트마다 페이로드가 달라 그대로 둠 (12-43)
 
 **남은 것** (우선순위순):
 1. 실기(Jetson) 이관 — 펌웨어 재빌드 → 지상 검증 → 계류비행 → 자유비행
 2. 캡스톤 보고서 시각화(텍스트 초안은 완료)
-3. correction_experiments 텔레메트리/오프보드 보일러플레이트 중복 정리
-4. (낮은 우선순위) 회전 피드포워드 미해결 문제 후속 — 0.05 아래로 더 낮춰보는
+3. (낮은 우선순위) 회전 피드포워드 미해결 문제 후속 — 0.05 아래로 더 낮춰보는
    미세 스윕, 또는 추정치 스무딩(EMA)으로 노이즈부터 줄인 뒤 게인 재탐색 (12-42)
    · 미배포 gust 모델을 `ACCEL_GAIN`/`WIND_DEADBAND_MPS` 재튜닝 기준으로 다시
    시도해볼지 검토 (12-39) · `ACCEL_GAIN_MIN`/`MAX`(적응형 게인,

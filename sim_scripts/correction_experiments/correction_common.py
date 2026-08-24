@@ -5,13 +5,25 @@ PINN 추정 버퍼, 스무딩, deadband)을 하나로 모음(EXPERIMENTS.md 12-2
 12-31/12-33절 - 복붙 상태 때문에 `set_wind()` 재발행 버그를 두 파일에서 따로
 발견/수정해야 했던 게 이 정리의 직접적인 계기).
 
-순수 리팩터링 - 로직/동작은 원본과 동일하게 유지함.
+이후 EXPERIMENTS.md 12-43절에서 같은 4개 스크립트에 복붙돼있던 텔레메트리/오프보드
+"진입부" 보일러플레이트(연결·GPS확인, arm+이륙, pv/att/gyro 모니터, offboard 진입)도
+추가로 통합함. 실제 바람/토크를 계속 흘려보내는 offboard_sender 루프 자체는 4개
+스크립트마다 페이로드가 서로 달라(가속도 vs 토크 DEBUG_VECT, 더더링 유무, 적응형
+게인 유무) 그대로 둠 - 12-33절 때와 같은 판단(중복은 적고 위험은 큰 부분은 안 건드림).
+
+순수 리팩터링 - 로직/동작은 원본과 동일하게 유지함. `arm_and_takeoff`/
+`start_telemetry_monitors`/`start_offboard_hold`는 원본 4개 스크립트에서 print
+문구가 스크립트마다 미세하게 달랐던 부분(예: 회전 스크립트는 "-> Armed"와
+"안전 고도 도달 대기 중..." 줄이 없었음)을 더 자세한 쪽으로 통일함 - 로그 출력
+문구만 살짝 달라지고 동작·타이밍·판정 로직은 전부 동일.
 """
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 import torch
+from mavsdk.offboard import OffboardError, PositionNedYaw, VelocityNedYaw, AccelerationNed
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "offline_training"))
 from wind_pinn_model import WindPINN  # noqa: E402
@@ -90,3 +102,108 @@ def apply_deadband(wind_n, wind_e, deadband):
         return 0.0, 0.0
     scale = (speed - deadband) / speed
     return wind_n * scale, wind_e * scale
+
+
+async def connect_and_wait_ready(drone):
+    """PX4 SITL에 연결하고 GPS/홈 위치가 준비될 때까지 대기."""
+    print("PX4 SITL에 연결 시도 중...")
+    await drone.connect(system_address="udpin://0.0.0.0:14540")
+    async for state in drone.core.connection_state():
+        if state.is_connected:
+            print("-> 드론에 연결됨!")
+            break
+
+    print("GPS/홈 위치 확인 중...")
+    async for health in drone.telemetry.health():
+        if health.is_global_position_ok and health.is_home_position_ok:
+            print("-> 전역 위치 및 홈 위치 준비 완료")
+            break
+
+
+async def arm_and_takeoff(drone, safe_altitude_m, takeoff_timeout_s):
+    """arm+이륙 후 안전 고도 도달까지 대기. 타임아웃 내에 도달 못 하면 착륙시키고
+    False 반환(호출부는 이 경우 즉시 return할 것) - 도달하면 True."""
+    print("\n--- Arming ---")
+    await drone.action.arm()
+    print("-> Armed")
+
+    print("\n--- Takeoff ---")
+    await drone.action.takeoff()
+
+    print(f"  안전 고도({safe_altitude_m}m) 도달 대기 중...")
+    t_start = time.monotonic()
+    async for position in drone.telemetry.position():
+        alt = position.relative_altitude_m
+        if alt >= safe_altitude_m:
+            print(f"  -> 안전 고도 도달 (relative_altitude={alt:.2f}m)")
+            return True
+        if time.monotonic() - t_start > takeoff_timeout_s:
+            print(f"  [경고] {takeoff_timeout_s:.0f}초 내에 안전 고도 미도달.")
+            break
+    await drone.action.land()
+    return False
+
+
+async def start_telemetry_monitors(drone):
+    """position/velocity, attitude, gyro 텔레메트리를 각각 최신값 dict로 유지하는
+    백그라운드 태스크 3개를 만들고, 셋 다 첫 값이 들어올 때까지 기다린 뒤
+    (latest_pv, latest_att, latest_gyro, pv_task, att_task, gyro_task) 반환.
+    태스크 3개는 호출부가 종료 시 직접 cancel할 책임을 짐(sender_task 등과 함께
+    한 번에 정리하는 기존 패턴 유지)."""
+    latest_pv = {"north": None, "east": None, "down": None, "vn": None, "ve": None, "vd": None}
+
+    async def pv_monitor():
+        async for pv in drone.telemetry.position_velocity_ned():
+            latest_pv["north"] = pv.position.north_m
+            latest_pv["east"] = pv.position.east_m
+            latest_pv["down"] = pv.position.down_m
+            latest_pv["vn"] = pv.velocity.north_m_s
+            latest_pv["ve"] = pv.velocity.east_m_s
+            latest_pv["vd"] = pv.velocity.down_m_s
+
+    pv_task = asyncio.create_task(pv_monitor())
+    while latest_pv["north"] is None:
+        await asyncio.sleep(0.05)
+
+    latest_att = {"roll": None, "pitch": None, "yaw": None}
+
+    async def att_monitor():
+        async for attitude in drone.telemetry.attitude_euler():
+            latest_att["roll"] = attitude.roll_deg
+            latest_att["pitch"] = attitude.pitch_deg
+            latest_att["yaw"] = attitude.yaw_deg
+
+    att_task = asyncio.create_task(att_monitor())
+    while latest_att["roll"] is None:
+        await asyncio.sleep(0.05)
+
+    latest_gyro = {"wx": None, "wy": None, "wz": None}
+
+    async def gyro_monitor():
+        async for av in drone.telemetry.attitude_angular_velocity_body():
+            latest_gyro["wx"] = av.roll_rad_s
+            latest_gyro["wy"] = av.pitch_rad_s
+            latest_gyro["wz"] = av.yaw_rad_s
+
+    gyro_task = asyncio.create_task(gyro_monitor())
+    while latest_gyro["wx"] is None:
+        await asyncio.sleep(0.05)
+
+    return latest_pv, latest_att, latest_gyro, pv_task, att_task, gyro_task
+
+
+async def start_offboard_hold(drone, nominal):
+    """현재 위치(nominal: north/east/down/yaw)를 setpoint로 offboard 모드 진입.
+    실패 시 착륙시키고 False 반환(호출부는 이 경우 즉시 return할 것) - 성공하면 True."""
+    await drone.offboard.set_position_velocity_acceleration_ned(
+        PositionNedYaw(nominal["north"], nominal["east"], nominal["down"], nominal["yaw"]),
+        VelocityNedYaw(0.0, 0.0, 0.0, nominal["yaw"]),
+        AccelerationNed(0.0, 0.0, 0.0),
+    )
+    try:
+        await drone.offboard.start()
+    except OffboardError as error:
+        print(f"Offboard 시작 실패: {error._result.result}")
+        await drone.action.land()
+        return False
+    return True
