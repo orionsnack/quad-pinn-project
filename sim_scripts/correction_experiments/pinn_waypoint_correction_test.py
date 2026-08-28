@@ -73,11 +73,16 @@ TRIAL_DURATION_S = 15.0
 # 2026-08-28 지표 재설계: 처음엔 "마지막 5초 평균"(정상상태 오차)을 썼는데,
 # 실측해보니 PX4 PID의 적분 항이 도달 후 ~4초 안에 바람을 거의 다 상쇄해버려서
 # (strong 조건 실측: 도달 직후 피크 0.52m -> 4초 만에 0.15m -> 7초 뒤엔 0.02~0.03m
-# 로 노이즈 바닥) 그 이후 구간을 재면 보정 효과가 안 보임. 대신 "목표에 처음
+# 로 노이즈 바닥) 그 이후 구간을 재면 보정 효과가 안 보임. 대신 "목표에 가장
 # 근접한 직후, 아직 적분이 다 안 감긴 구간"의 피크 오차를 잼 - 기존 실험들(3.1/
 # 3.3절)이 "바람 온셋 직후 피크"를 쓴 것과 같은 철학.
-ARRIVAL_THRESHOLD_M = 2.0   # 이 거리 안에 처음 들어온 시점을 "도달 시작"으로 봄
-ARRIVAL_WINDOW_S = 5.0      # 도달 시작 후 이 기간 동안의 peak pos_error가 지표
+#
+# 1차 시도(문턱 기반, 실패): "ARRIVAL_THRESHOLD_M 이내로 처음 들어온 시점"을
+# 기준으로 삼았더니, 아직 감속 중이라 그 문턱값 자체(~2m)가 항상 window의
+# 최댓값이 돼버려 5조건 전부 1.7~2.0m로 나옴(2026-08-28 밤 발견, 미수정 상태로
+# 커밋됨). "최근접 시점"(pos_error 최솟값 순간, 이미 감속 끝난 뒤) 기준으로
+# 교체 - 아직 SITL로 재검증 못 함, 다음 세션에서 확인할 것.
+ARRIVAL_WINDOW_S = 5.0      # 최근접 시점 이후 이 기간 동안의 peak pos_error가 지표
 SETTLE_WINDOW_S = 5.0     # 마지막 5초 동안의 pos_error 평균 = "정상상태 위치오차"
                           # (참고용으로 계속 계산·출력함 - 적분이 다 감긴 뒤 상태 확인용)
 RETURN_HOME_WAIT_S = 10.0  # 조건 전환마다 홈으로 복귀+안정화하는 대기 시간 -
@@ -175,8 +180,7 @@ async def run():
         next_log = time.monotonic()
         peak_error = 0.0
         settle_errors = []
-        arrival_step = None    # 목표에 처음 ARRIVAL_THRESHOLD_M 이내로 들어온 스텝
-        arrival_peak_error = 0.0
+        all_errors = []   # 트라이얼 전체 pos_error - 사후에 "최근접 시점" 찾는 데 씀
 
         for i in range(n_steps):
             t = i * LOG_INTERVAL_S
@@ -210,11 +214,7 @@ async def run():
             peak_error = max(peak_error, pos_error)
             if i >= n_steps - settle_steps:
                 settle_errors.append(pos_error)
-
-            if arrival_step is None and pos_error <= ARRIVAL_THRESHOLD_M:
-                arrival_step = i
-            if arrival_step is not None and i < arrival_step + arrival_window_steps:
-                arrival_peak_error = max(arrival_peak_error, pos_error)
+            all_errors.append(pos_error)
 
             writer.writerow([
                 wind_label, phase_name, f"{t:.2f}", f"{wind_n:.2f}", f"{wind_e:.2f}",
@@ -232,10 +232,17 @@ async def run():
                 next_log = time.monotonic()
 
         steady_state_error = sum(settle_errors) / len(settle_errors) if settle_errors else peak_error
-        # arrival_step이 끝내 None이면(트라이얼 내내 ARRIVAL_THRESHOLD_M 안에 못
-        # 들어옴 - 발산 등 이상상황) transit peak를 대신 씀, 0으로 감추지 않음
-        if arrival_step is None:
-            arrival_peak_error = peak_error
+        # "도달 시점"을 ARRIVAL_THRESHOLD_M 문턱 최초 통과로 정의했더니, 접근
+        # 중이라 아직 감속 못 한 그 문턱값 자체(~2m)가 매번 창(window)의 최댓값이
+        # 돼버려 바람에 의한 되돌아옴(실측 0.52m)보다 훨씬 크게 잡히는 버그가 있었음
+        # (2026-08-28 밤 5조건 스모크테스트에서 전부 1.7~2.0m로 나와 발견 -
+        # EXPERIMENTS.md 12-47절 참고). 문턱 기반 대신 "최근접 시점"(pos_error가
+        # 가장 작았던 순간, 이미 감속이 끝난 뒤라 신뢰 가능)을 기준으로 재정의:
+        # 그 시점부터 ARRIVAL_WINDOW_S 동안의 peak가 진짜 "도달 후 바람에 얼마나
+        # 밀리는지"를 나타냄.
+        closest_idx = min(range(len(all_errors)), key=lambda k: all_errors[k])
+        arrival_window_slice = all_errors[closest_idx: closest_idx + arrival_window_steps]
+        arrival_peak_error = max(arrival_window_slice) if arrival_window_slice else peak_error
         return arrival_peak_error, steady_state_error, peak_error
 
     async def return_home():
