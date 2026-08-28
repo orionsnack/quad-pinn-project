@@ -10,9 +10,14 @@
   홈 위치로 복귀+안정화(무풍) -> 바람 온셋 -> 목표 웨이포인트(홈에서 동쪽으로
   WAYPOINT_OFFSET_EAST_M) 커맨드 -> 보정 OFF로 TRIAL_DURATION_S초 관찰 ->
   같은 과정을 보정 ON으로 반복
-"정상상태 위치오차"(steady_state_error) = 트라이얼 마지막 SETTLE_WINDOW_S초 동안의
-pos_error 평균 - 이동 중 과도구간(transit)은 클수록 당연하므로 peak가 아니라
-"도달 후 얼마나 정확히 머무는지"를 재는 게 이 실험의 목적에 맞음.
+지표(2026-08-28 재설계, EXPERIMENTS.md 12-47절): 처음엔 "정상상태 위치오차"
+(트라이얼 마지막 SETTLE_WINDOW_S초 동안의 pos_error 평균)를 썼는데, 실측해보니
+PX4 PID의 적분 항이 도달 후 몇 초 안에 바람을 거의 다 상쇄해버려서 그 시점 이후를
+재면 보정 효과가 안 보임(strong 조건 실측: 도달 직후 피크 0.52m -> 4초 만에
+0.15m -> 7초 뒤엔 노이즈 바닥 0.02~0.03m). 대신 **"목표에 처음 근접한 직후,
+아직 적분이 다 안 감긴 구간의 피크 오차"**(arrival_peak_error)를 주 지표로 씀 -
+기존 실험들(3.1/3.3절)이 "바람 온셋 직후 피크"를 쓴 것과 같은 철학. 정상상태
+오차도 참고용으로 계속 같이 출력함.
 
 바람 조건은 pinn_wind_correction_sweep.py와 동일한 5개 벡터를 그대로 재사용
 (ACCEL_GAIN=0.05 등 기존 최선 파라미터와 직접 비교 가능하도록). 이동 축을
@@ -65,8 +70,16 @@ WAYPOINT_OFFSET_NORTH_M = 0.0
 WAYPOINT_OFFSET_EAST_M = 10.0   # 홈에서 동쪽으로 10m 지점을 목표로 이동
 
 TRIAL_DURATION_S = 15.0
+# 2026-08-28 지표 재설계: 처음엔 "마지막 5초 평균"(정상상태 오차)을 썼는데,
+# 실측해보니 PX4 PID의 적분 항이 도달 후 ~4초 안에 바람을 거의 다 상쇄해버려서
+# (strong 조건 실측: 도달 직후 피크 0.52m -> 4초 만에 0.15m -> 7초 뒤엔 0.02~0.03m
+# 로 노이즈 바닥) 그 이후 구간을 재면 보정 효과가 안 보임. 대신 "목표에 처음
+# 근접한 직후, 아직 적분이 다 안 감긴 구간"의 피크 오차를 잼 - 기존 실험들(3.1/
+# 3.3절)이 "바람 온셋 직후 피크"를 쓴 것과 같은 철학.
+ARRIVAL_THRESHOLD_M = 2.0   # 이 거리 안에 처음 들어온 시점을 "도달 시작"으로 봄
+ARRIVAL_WINDOW_S = 5.0      # 도달 시작 후 이 기간 동안의 peak pos_error가 지표
 SETTLE_WINDOW_S = 5.0     # 마지막 5초 동안의 pos_error 평균 = "정상상태 위치오차"
-                          # (트라이얼 앞부분 ~10초는 이동+정착 시간으로 간주하고 안 씀)
+                          # (참고용으로 계속 계산·출력함 - 적분이 다 감긴 뒤 상태 확인용)
 RETURN_HOME_WAIT_S = 10.0  # 조건 전환마다 홈으로 복귀+안정화하는 대기 시간 -
                             # 실제로 ~10m를 왕복 비행해야 하므로 기존 PHASE_GAP_S(4초,
                             # 제자리 유지 실험 기준)보다 넉넉하게 잡음
@@ -158,9 +171,12 @@ async def run():
         smoother_e = EmaSmoother(time_constant_s=0.4, dt_s=LOG_INTERVAL_S)
         n_steps = int(TRIAL_DURATION_S / LOG_INTERVAL_S)
         settle_steps = int(SETTLE_WINDOW_S / LOG_INTERVAL_S)
+        arrival_window_steps = int(ARRIVAL_WINDOW_S / LOG_INTERVAL_S)
         next_log = time.monotonic()
         peak_error = 0.0
         settle_errors = []
+        arrival_step = None    # 목표에 처음 ARRIVAL_THRESHOLD_M 이내로 들어온 스텝
+        arrival_peak_error = 0.0
 
         for i in range(n_steps):
             t = i * LOG_INTERVAL_S
@@ -195,6 +211,11 @@ async def run():
             if i >= n_steps - settle_steps:
                 settle_errors.append(pos_error)
 
+            if arrival_step is None and pos_error <= ARRIVAL_THRESHOLD_M:
+                arrival_step = i
+            if arrival_step is not None and i < arrival_step + arrival_window_steps:
+                arrival_peak_error = max(arrival_peak_error, pos_error)
+
             writer.writerow([
                 wind_label, phase_name, f"{t:.2f}", f"{wind_n:.2f}", f"{wind_e:.2f}",
                 f"{current_cmd['accel_n']:.3f}", f"{current_cmd['accel_e']:.3f}",
@@ -211,7 +232,11 @@ async def run():
                 next_log = time.monotonic()
 
         steady_state_error = sum(settle_errors) / len(settle_errors) if settle_errors else peak_error
-        return steady_state_error, peak_error
+        # arrival_step이 끝내 None이면(트라이얼 내내 ARRIVAL_THRESHOLD_M 안에 못
+        # 들어옴 - 발산 등 이상상황) transit peak를 대신 씀, 0으로 감추지 않음
+        if arrival_step is None:
+            arrival_peak_error = peak_error
+        return arrival_peak_error, steady_state_error, peak_error
 
     async def return_home():
         await set_wind(0.0, 0.0)
@@ -230,25 +255,27 @@ async def run():
         await set_wind(wind_vx, wind_vy)
         nominal["north"] = target["north"]
         nominal["east"] = target["east"]
-        err_off, peak_off = await run_trial(wind_label, "waypoint_off", use_correction=False)
-        print(f"    정상상태 위치오차(OFF) = {err_off:.3f}m  (이동중 peak = {peak_off:.3f}m)")
+        arr_off, settle_off, peak_off = await run_trial(wind_label, "waypoint_off", use_correction=False)
+        print(f"    도달직후 피크오차(OFF) = {arr_off:.3f}m  "
+              f"(정상상태={settle_off:.3f}m, 이동중peak={peak_off:.3f}m)")
 
         print("  -- 웨이포인트 이동 보정 ON --")
         await return_home()
         await set_wind(wind_vx, wind_vy)
         nominal["north"] = target["north"]
         nominal["east"] = target["east"]
-        err_on, peak_on = await run_trial(wind_label, "waypoint_on", use_correction=True)
-        print(f"    정상상태 위치오차(ON)  = {err_on:.3f}m  (이동중 peak = {peak_on:.3f}m)")
+        arr_on, settle_on, peak_on = await run_trial(wind_label, "waypoint_on", use_correction=True)
+        print(f"    도달직후 피크오차(ON)  = {arr_on:.3f}m  "
+              f"(정상상태={settle_on:.3f}m, 이동중peak={peak_on:.3f}m)")
 
-        improvement = (err_off - err_on) / err_off * 100 if err_off > 1e-6 else 0.0
+        improvement = (arr_off - arr_on) / arr_off * 100 if arr_off > 1e-6 else 0.0
         print(f"    개선율 = {improvement:+.1f}%")
-        results.append((wind_label, wind_vx, wind_vy, err_off, err_on, improvement))
+        results.append((wind_label, wind_vx, wind_vy, arr_off, arr_on, improvement))
 
     await return_home()
     csv_file.close()
 
-    print(f"\n{'='*70}\n=== 전체 요약 (정상상태 위치오차) ===\n{'='*70}")
+    print(f"\n{'='*70}\n=== 전체 요약 (도달직후 {ARRIVAL_WINDOW_S:.0f}초간 피크오차) ===\n{'='*70}")
     print(f"{'조건':10s} {'풍속(m/s)':>10s} {'OFF':>10s} {'ON':>10s} {'개선율':>8s}")
     for label, vx, vy, off, on, imp in results:
         speed = (vx**2 + vy**2) ** 0.5
