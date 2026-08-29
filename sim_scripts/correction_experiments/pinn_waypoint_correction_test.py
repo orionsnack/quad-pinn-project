@@ -168,6 +168,22 @@ async def run():
     print(f"  홈=({home['north']:.2f},{home['east']:.2f})  "
           f"목표=({target['north']:.2f},{target['east']:.2f})")
 
+    # 2026-08-29 추가: 홈->목표 직선에서 얼마나 옆으로 벗어났는지(경로 이탈량).
+    # "도착직후 피크오차"(arrival_peak_error)와 달리 "언제 도착했는지"를 정의할
+    # 필요가 없어 그 정의를 둘러싼 두 번의 버그(12-47/48)를 애초에 피해감 -
+    # 트라이얼 시작(홈 근처, 직선 위)과 끝(목표 근처, 직선 위)에서 자연히 0에
+    # 가까워지므로 트라이얼 전체에서의 peak를 그냥 쓰면 됨.
+    home_to_target_n = target["north"] - home["north"]
+    home_to_target_e = target["east"] - home["east"]
+    home_to_target_dist = (home_to_target_n ** 2 + home_to_target_e ** 2) ** 0.5
+
+    def cross_track_error(north, east):
+        if home_to_target_dist < 1e-6:
+            return ((north - home["north"]) ** 2 + (east - home["east"]) ** 2) ** 0.5
+        # 2D 외적으로 부호 있는 수선 거리 계산, 크기만 씀
+        v_n, v_e = north - home["north"], east - home["east"]
+        return abs(v_e * home_to_target_n - v_n * home_to_target_e) / home_to_target_dist
+
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = f"../../logs/pinn_waypoint_correction_{timestamp_str}.csv"
     csv_file = open(csv_path, "w", newline="")
@@ -176,7 +192,7 @@ async def run():
         "wind_label", "phase", "t_s", "wind_est_north", "wind_est_east",
         "accel_n_m_s2", "accel_e_m_s2",
         "target_north_m", "target_east_m", "actual_north_m", "actual_east_m",
-        "pos_error_m", "roll_deg", "pitch_deg",
+        "pos_error_m", "cross_track_error_m", "roll_deg", "pitch_deg",
     ])
     print(f"\nCSV 로그 저장 경로: {csv_path}")
 
@@ -192,6 +208,7 @@ async def run():
         peak_error = 0.0
         settle_errors = []
         all_errors = []   # 트라이얼 전체 pos_error - 사후에 "최근접 시점" 찾는 데 씀
+        peak_cross_track = 0.0
 
         for i in range(n_steps):
             t = i * LOG_INTERVAL_S
@@ -227,11 +244,14 @@ async def run():
                 settle_errors.append(pos_error)
             all_errors.append(pos_error)
 
+            xtrack = cross_track_error(north, east)
+            peak_cross_track = max(peak_cross_track, xtrack)
+
             writer.writerow([
                 wind_label, phase_name, f"{t:.2f}", f"{wind_n:.2f}", f"{wind_e:.2f}",
                 f"{current_cmd['accel_n']:.3f}", f"{current_cmd['accel_e']:.3f}",
                 f"{nominal['north']:.3f}", f"{nominal['east']:.3f}",
-                f"{north:.3f}", f"{east:.3f}", f"{pos_error:.3f}",
+                f"{north:.3f}", f"{east:.3f}", f"{pos_error:.3f}", f"{xtrack:.3f}",
                 f"{roll:.2f}", f"{pitch:.2f}",
             ])
 
@@ -256,7 +276,7 @@ async def run():
         closest_idx = min(range(len(early_slice)), key=lambda k: early_slice[k])
         arrival_window_slice = all_errors[closest_idx: closest_idx + arrival_window_steps]
         arrival_peak_error = max(arrival_window_slice) if arrival_window_slice else peak_error
-        return arrival_peak_error, steady_state_error, peak_error
+        return arrival_peak_error, steady_state_error, peak_error, peak_cross_track
 
     async def return_home():
         await set_wind(0.0, 0.0)
@@ -275,8 +295,9 @@ async def run():
         await set_wind(wind_vx, wind_vy)
         nominal["north"] = target["north"]
         nominal["east"] = target["east"]
-        arr_off, settle_off, peak_off = await run_trial(wind_label, "waypoint_off", use_correction=False)
-        print(f"    도달직후 피크오차(OFF) = {arr_off:.3f}m  "
+        arr_off, settle_off, peak_off, xtrack_off = \
+            await run_trial(wind_label, "waypoint_off", use_correction=False)
+        print(f"    도달직후 피크오차(OFF) = {arr_off:.3f}m  경로이탈peak = {xtrack_off:.3f}m  "
               f"(정상상태={settle_off:.3f}m, 이동중peak={peak_off:.3f}m)")
 
         print("  -- 웨이포인트 이동 보정 ON --")
@@ -284,25 +305,32 @@ async def run():
         await set_wind(wind_vx, wind_vy)
         nominal["north"] = target["north"]
         nominal["east"] = target["east"]
-        arr_on, settle_on, peak_on = await run_trial(wind_label, "waypoint_on", use_correction=True)
-        print(f"    도달직후 피크오차(ON)  = {arr_on:.3f}m  "
+        arr_on, settle_on, peak_on, xtrack_on = \
+            await run_trial(wind_label, "waypoint_on", use_correction=True)
+        print(f"    도달직후 피크오차(ON)  = {arr_on:.3f}m  경로이탈peak = {xtrack_on:.3f}m  "
               f"(정상상태={settle_on:.3f}m, 이동중peak={peak_on:.3f}m)")
 
         improvement = (arr_off - arr_on) / arr_off * 100 if arr_off > 1e-6 else 0.0
-        print(f"    개선율 = {improvement:+.1f}%")
-        results.append((wind_label, wind_vx, wind_vy, arr_off, arr_on, improvement))
+        xtrack_improvement = (xtrack_off - xtrack_on) / xtrack_off * 100 if xtrack_off > 1e-6 else 0.0
+        print(f"    개선율(도달직후) = {improvement:+.1f}%   개선율(경로이탈) = {xtrack_improvement:+.1f}%")
+        results.append((wind_label, wind_vx, wind_vy, arr_off, arr_on, improvement,
+                         xtrack_off, xtrack_on, xtrack_improvement))
 
     await return_home()
     csv_file.close()
 
-    print(f"\n{'='*70}\n=== 전체 요약 (도달직후 {ARRIVAL_WINDOW_S:.0f}초간 피크오차) ===\n{'='*70}")
-    print(f"{'조건':10s} {'풍속(m/s)':>10s} {'OFF':>10s} {'ON':>10s} {'개선율':>8s}")
-    for label, vx, vy, off, on, imp in results:
+    print(f"\n{'='*70}\n=== 전체 요약 ===\n{'='*70}")
+    print(f"{'조건':10s} {'풍속':>6s} {'도달OFF':>8s} {'도달ON':>8s} {'개선율':>8s} "
+          f"{'경로OFF':>8s} {'경로ON':>8s} {'개선율':>8s}")
+    for label, vx, vy, off, on, imp, xoff, xon, ximp in results:
         speed = (vx**2 + vy**2) ** 0.5
-        print(f"{label:10s} {speed:10.2f} {off:10.3f} {on:10.3f} {imp:+7.1f}%")
+        print(f"{label:10s} {speed:6.2f} {off:8.3f} {on:8.3f} {imp:+7.1f}% "
+              f"{xoff:8.3f} {xon:8.3f} {ximp:+7.1f}%")
 
     n_improved = sum(1 for r in results if r[5] > 0)
-    print(f"\n개선된 조건: {n_improved}/{len(results)}")
+    n_xtrack_improved = sum(1 for r in results if r[8] > 0)
+    print(f"\n도달직후 개선된 조건: {n_improved}/{len(results)}   "
+          f"경로이탈 개선된 조건: {n_xtrack_improved}/{len(results)}")
     print(f"CSV 저장됨: {csv_path}")
 
     if send_gaps:
