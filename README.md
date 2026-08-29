@@ -12,7 +12,7 @@ Neural Network)을 학습시키고, 그 추정치를 실제 비행 제어 루프
 | [CAPSTONE_REPORT_DRAFT.md](CAPSTONE_REPORT_DRAFT.md) | 서론/방법론/결과/교훈으로 정리한 전체 서사 — 읽을거리는 여기 |
 | [STRUCTURE.md](STRUCTURE.md) | 파이프라인/제어루프/모델 구조 개요도 |
 | [USAGE.md](USAGE.md) | 파일별 실행 방법 |
-| [EXPERIMENTS.md](EXPERIMENTS.md) | 실험 상세 기록(50개 절) — 설계 이유·실패한 시도·근거 있는 결론, 모든 수치의 출처 |
+| [EXPERIMENTS.md](EXPERIMENTS.md) | 실험 상세 기록(51개 절) — 설계 이유·실패한 시도·근거 있는 결론, 모든 수치의 출처 |
 | [setup_guide.md](setup_guide.md) | 환경 재현 가이드 + 트러블슈팅 |
 | [RAMPNET_ROADMAP.md](RAMPNET_ROADMAP.md) | RAMP-Net(MPC) 완전 재현 시 로드맵 — 사전검증(0단계)까지 끝났으나 스코프 밖, 착수 안 함 |
 
@@ -135,10 +135,18 @@ calm에도 바람과 무관한 PID 자체의 정상 오버슈트가 있다는 �
 개선, crosswind(진행방향과 정확히 수직인 유일한 조건)만 경로이탈이 -46.4%로
 악화 - 눈에 띄지만 이것도 N=1이라 결론 못 냄(EXPERIMENTS.md 12-50절).
 
+**웨이포인트 전용 집계 스크립트 `aggregate_waypoint_repeats.py`도 작성 완료
+(코드만, SITL은 아직 안 돌림).** 기존 `aggregate_repeats.py`는 phase 전체
+peak를 쓰는데 웨이포인트 트라이얼엔 안 맞아서, 원본 스크립트와 똑같은 방식
+(행 개수 기준 슬라이스)으로 두 지표를 CSV에서 재계산하는 스크립트를 새로 만듦
+- 검증 중 시간값 비교 vs 행 개수 비교의 경계 불일치 버그를 하나 더 잡음
+(crosswind에서 0.171m vs 0.165m로 어긋났던 것). 12-49절 검증 CSV로 대조해
+5조건 전부 일치 확인(EXPERIMENTS.md 12-51절).
+
 **남은 것(우선순위순)**:
-1. 웨이포인트 지표 2종(도달직후/경로이탈) N=10 반복 검증 — 지표 버그는 다
-   잡혔으니 이제 `aggregate_repeats.py`를 이 CSV 스키마에 맞게 확장(또는 전용
-   집계 스크립트 작성)하고 실제 반복측정 진행 (EXPERIMENTS.md 12-49/50)
+1. 웨이포인트 N=10 반복 검증 실행 — 집계 스크립트는 준비됐으니 이제
+   `repeat_sweep.sh`로 실제로 돌리고 `aggregate_waypoint_repeats.py`로
+   집계하는 일만 남음 (EXPERIMENTS.md 12-51)
 2. tau_smooth_s=0.2를 5조건 전체 N=10으로 검증 — 지금까지 양호했던 조건들을
    스무딩이 훼손하지 않는지 확인 (EXPERIMENTS.md 12-45)
 3. 캡스톤 보고서 그래프/표 시각화(텍스트 초안은 완료, 다만 목표 전환 반영해

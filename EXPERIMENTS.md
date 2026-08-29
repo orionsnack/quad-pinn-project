@@ -2248,6 +2248,40 @@ CSV: `logs/pinn_waypoint_correction_20260829_144444.csv`(수정판 검증, 커�
 
 ---
 
+## 12-51. 웨이포인트 전용 집계 스크립트 작성 (2026-08-29)
+
+**배경**: 12-50절에서 남긴 과제 - 기존 `aggregate_repeats.py`는 phase 전체의
+"peak pos_error"를 그대로 쓰는데, 웨이포인트 트라이얼은 초반 이동거리 자체가
+그 peak가 돼버려 안 맞음(12-47절에서 이미 겪은 문제와 동일 구조). N=10 반복
+검증을 하려면 전용 집계 로직이 필요해서 먼저 코드만 작성(SITL은 안 돌림 -
+사용자가 "코드만 생성해봐"로 범위를 명시).
+
+**구현**: `aggregate_waypoint_repeats.py` 신설. `pinn_waypoint_correction_test.py`의
+`run_trial()`과 동일한 두 지표를 CSV 원시 시계열(`t_s`/`pos_error_m`/
+`cross_track_error_m`)에서 재계산:
+- `arrival_peak_error`: `EARLY_SEARCH_WINDOW_S` 이내 최근접 시점부터
+  `ARRIVAL_WINDOW_S` 동안의 peak `pos_error_m`
+- `peak_cross_track`: phase 전체의 `cross_track_error_m` 최댓값(도착 시점
+  정의가 필요 없어 그대로 전체 peak면 됨)
+
+**검증 중 발견한 버그**: 처음엔 "최근접 시점 탐색"을 `t_s <= EARLY_SEARCH_WINDOW_S`
+(시간값 비교)로 구현했는데, 기존 12-49절 검증 CSV로 대조하니 crosswind 조건에서
+`arrival_peak_error`가 0.171m(원본 스크립트)과 0.165m(집계기)로 어긋남 - 원본은
+"행(row) 개수" 기준 슬라이스(`all_errors[:early_search_steps]`, 즉 t<6.00)를
+쓰는데 집계기는 `t<=6.00`을 써서 경계의 t=6.00 행 하나를 더 포함시켰기 때문
+(그 지점에서 값이 0.171→0.165로 계속 감소 중이었음 - crosswind 조건은 6초
+안에 최근접점에 도달하지도 못했다는 뜻이기도 함, 별도로 살펴볼 만한 신호).
+시간값 비교 대신 원본과 동일한 "행 개수" 기준 슬라이스로 고쳐 정확히 일치시킴
+(`logs/pinn_waypoint_correction_20260829_145751.csv`로 대조 검증, 5조건 전부
+±0.1%p 이내 반올림 차이로 일치).
+
+**다음에 볼 것**: 이 집계기로 실제 N=10 반복 검증(`repeat_sweep.sh --script
+pinn_waypoint_correction_test.py --repeats 10`) 실행 - 아직 안 함. crosswind가
+6초 안에 최근접점을 못 찾은 것도 확인되면 `EARLY_SEARCH_WINDOW_S`를 더
+넉넉하게(예: 8~10초) 늘리는 것도 검토할 만함.
+
+---
+
 ## 다음 단계
 
 전체 서사는 [CAPSTONE_REPORT_DRAFT.md](CAPSTONE_REPORT_DRAFT.md) 참고. 아래는 절
@@ -2336,12 +2370,17 @@ CSV: `logs/pinn_waypoint_correction_20260829_144444.csv`(수정판 검증, 커�
   구조를 원천적으로 피함. 5조건 검증(N=1): 도달직후 4/5, 경로이탈 3/5 개선,
   crosswind(진행방향과 정확히 수직인 유일한 조건)만 경로이탈이 -46.4%로
   악화 - 눈에 띄지만 이것도 N=1이라 결론 못 냄 (12-50)
+- 웨이포인트 전용 집계 스크립트 `aggregate_waypoint_repeats.py` 작성(코드만 -
+  SITL은 안 돌림, 사용자 지시). 검증 중 "행 개수 기준 vs 시간값 기준" 슬라이스
+  경계 불일치 버그를 하나 더 발견·수정(crosswind에서 0.171m vs 0.165m로 어긋남).
+  crosswind가 `EARLY_SEARCH_WINDOW_S`(6초) 안에 최근접점을 못 찾고 있었다는
+  부수 발견도 있음 - 나중에 그 값을 늘려야 할 수도 있음 (12-51)
 
 **남은 것** (우선순위순):
-1. **웨이포인트 지표 2종(도달직후/경로이탈) N=10 반복 검증** — 지표 버그는
-   다 잡혔으니(12-49/50) 이제 `aggregate_repeats.py`가 이 CSV 스키마에 안
-   맞는 문제만 해결하면 됨 - 전용 집계 로직 작성 필요
-2. 캡스톤 보고서 시각화(텍스트 초안은 완료, 다만 12-46~50절 목표 전환을 반영해
+1. **웨이포인트 N=10 반복 검증 실행** — 집계 스크립트는 이제 준비됐으니
+   (12-51) `repeat_sweep.sh --script pinn_waypoint_correction_test.py --repeats 10`
+   실제로 돌리고 `aggregate_waypoint_repeats.py`로 집계하는 일만 남음
+2. 캡스톤 보고서 시각화(텍스트 초안은 완료, 다만 12-46~51절 목표 전환을 반영해
    서사 자체도 갱신 필요)
 3. (낮은 우선순위) 회전 피드포워드 미해결 문제 후속 — tau_smooth_s=0.2를
    5조건 전체 N=10으로 검증(12-45, 승인 대기), 또는 0.05 아래로 더 낮춰보는
