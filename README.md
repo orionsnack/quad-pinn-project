@@ -12,7 +12,7 @@ Neural Network)을 학습시키고, 그 추정치를 실제 비행 제어 루프
 | [CAPSTONE_REPORT_DRAFT.md](CAPSTONE_REPORT_DRAFT.md) | 서론/방법론/결과/교훈으로 정리한 전체 서사 — 읽을거리는 여기 |
 | [STRUCTURE.md](STRUCTURE.md) | 파이프라인/제어루프/모델 구조 개요도 |
 | [USAGE.md](USAGE.md) | 파일별 실행 방법 |
-| [EXPERIMENTS.md](EXPERIMENTS.md) | 실험 상세 기록(51개 절) — 설계 이유·실패한 시도·근거 있는 결론, 모든 수치의 출처 |
+| [EXPERIMENTS.md](EXPERIMENTS.md) | 실험 상세 기록(52개 절) — 설계 이유·실패한 시도·근거 있는 결론, 모든 수치의 출처 |
 | [setup_guide.md](setup_guide.md) | 환경 재현 가이드 + 트러블슈팅 |
 | [RAMPNET_ROADMAP.md](RAMPNET_ROADMAP.md) | RAMP-Net(MPC) 완전 재현 시 로드맵 — 사전검증(0단계)까지 끝났으나 스코프 밖, 착수 안 함 |
 
@@ -143,10 +143,17 @@ peak를 쓰는데 웨이포인트 트라이얼엔 안 맞아서, 원본 스크�
 (crosswind에서 0.171m vs 0.165m로 어긋났던 것). 12-49절 검증 CSV로 대조해
 5조건 전부 일치 확인(EXPERIMENTS.md 12-51절).
 
+**웨이포인트 N=10 반복 검증 첫 결과 — 조건별로 결과가 완전히 갈림.** calm/strong은
+도달직후 오차가 확실히 개선(+60.8%±6.5% / +41.2%±25.5%). **crosswind는 경로
+이탈량이 확실히 악화**(-41.1%±4.3%, 신뢰구간 전부 음수) - N=1 때 봤던 -46.4%가
+노이즈가 아니라 재현되는 진짜 신호였음. crosswind는 이 실험에서 유일하게
+진행방향과 정확히 수직인 바람이라, 게인이 "제자리 유지" 시나리오 기준으로
+튜닝된 값이라 "이동 중" 시나리오엔 안 맞을 가능성. light/default는 표준편차가
+너무 커서(default는 79.5%p, 이상치 1회 포함) 아직 판단 불가(EXPERIMENTS.md 12-52절).
+
 **남은 것(우선순위순)**:
-1. 웨이포인트 N=10 반복 검증 실행 — 집계 스크립트는 준비됐으니 이제
-   `repeat_sweep.sh`로 실제로 돌리고 `aggregate_waypoint_repeats.py`로
-   집계하는 일만 남음 (EXPERIMENTS.md 12-51)
+1. default 조건 이상치 원인 조사, crosswind 경로이탈 악화가 게인 문제인지
+   확인(낮은 게인 재시도), calm의 우연한 오버슈트 댐핑 가설 검증 (12-52)
 2. tau_smooth_s=0.2를 5조건 전체 N=10으로 검증 — 지금까지 양호했던 조건들을
    스무딩이 훼손하지 않는지 확인 (EXPERIMENTS.md 12-45)
 3. 캡스톤 보고서 그래프/표 시각화(텍스트 초안은 완료, 다만 목표 전환 반영해
