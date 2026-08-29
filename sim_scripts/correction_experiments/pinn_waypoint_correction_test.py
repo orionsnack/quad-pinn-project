@@ -81,7 +81,17 @@ TRIAL_DURATION_S = 15.0
 # 기준으로 삼았더니, 아직 감속 중이라 그 문턱값 자체(~2m)가 항상 window의
 # 최댓값이 돼버려 5조건 전부 1.7~2.0m로 나옴(2026-08-28 밤 발견, 미수정 상태로
 # 커밋됨). "최근접 시점"(pos_error 최솟값 순간, 이미 감속 끝난 뒤) 기준으로
-# 교체 - 아직 SITL로 재검증 못 함, 다음 세션에서 확인할 것.
+# 교체 - SITL 재검증(2026-08-29)해보니 또 다른 버그 발견: "최근접 시점"을
+# 트라이얼 전체(15초)에서 찾다 보니, 실제 도달(t≈2.3~2.9초)보다 한참 뒤인
+# t≈8~13초 사이에서 PX4의 자연스러운 미세 진동(노이즈 바닥, ~0.02~0.07m 진폭 -
+# 12-47절에서도 이미 확인된 현상)이 우연히 더 작은 값을 찍는 순간이 있고, 그게
+# "최근접"으로 잘못 뽑혀 window가 진짜 도달 직후가 아니라 이미 다 안정화된 뒤의
+# 노이즈 구간을 보고 있었음(strong 조건 실측: 진짜 도달 피크는 t=2.90에 0.509m
+# 였는데, 지표는 t=8.20~13.20 구간의 노이즈 피크 0.068m를 보고함). 최근접 탐색을
+# `EARLY_SEARCH_WINDOW_S`(실측 transit 시간 2.3~2.9초 기준으로 넉넉하게 6초)
+# 이내로 제한해서 고침 - 아직 이 수정판은 SITL로 재검증 안 됨.
+EARLY_SEARCH_WINDOW_S = 6.0  # 이 시간 안에서만 "최근접 시점"을 찾음(그 이후의
+                              # 노이즈 바닥 진동에 낚이지 않도록)
 ARRIVAL_WINDOW_S = 5.0      # 최근접 시점 이후 이 기간 동안의 peak pos_error가 지표
 SETTLE_WINDOW_S = 5.0     # 마지막 5초 동안의 pos_error 평균 = "정상상태 위치오차"
                           # (참고용으로 계속 계산·출력함 - 적분이 다 감긴 뒤 상태 확인용)
@@ -177,6 +187,7 @@ async def run():
         n_steps = int(TRIAL_DURATION_S / LOG_INTERVAL_S)
         settle_steps = int(SETTLE_WINDOW_S / LOG_INTERVAL_S)
         arrival_window_steps = int(ARRIVAL_WINDOW_S / LOG_INTERVAL_S)
+        early_search_steps = int(EARLY_SEARCH_WINDOW_S / LOG_INTERVAL_S)
         next_log = time.monotonic()
         peak_error = 0.0
         settle_errors = []
@@ -236,11 +247,13 @@ async def run():
         # 중이라 아직 감속 못 한 그 문턱값 자체(~2m)가 매번 창(window)의 최댓값이
         # 돼버려 바람에 의한 되돌아옴(실측 0.52m)보다 훨씬 크게 잡히는 버그가 있었음
         # (2026-08-28 밤 5조건 스모크테스트에서 전부 1.7~2.0m로 나와 발견 -
-        # EXPERIMENTS.md 12-47절 참고). 문턱 기반 대신 "최근접 시점"(pos_error가
-        # 가장 작았던 순간, 이미 감속이 끝난 뒤라 신뢰 가능)을 기준으로 재정의:
-        # 그 시점부터 ARRIVAL_WINDOW_S 동안의 peak가 진짜 "도달 후 바람에 얼마나
-        # 밀리는지"를 나타냄.
-        closest_idx = min(range(len(all_errors)), key=lambda k: all_errors[k])
+        # EXPERIMENTS.md 12-47절 참고). "최근접 시점" 기준으로 바꿨는데, 이번엔
+        # 그 탐색을 트라이얼 전체(15초)에서 하다 보니 실제 도달(2.3~2.9초)보다
+        # 한참 뒤 노이즈 바닥 진동의 우연한 저점을 "최근접"으로 잘못 집는 버그가
+        # 또 나옴(2026-08-29 재검증에서 발견 - EXPERIMENTS.md 12-48/49절 참고).
+        # EARLY_SEARCH_WINDOW_S 이내로만 탐색을 제한해 진짜 도달 시점만 잡히게 함.
+        early_slice = all_errors[:early_search_steps] if all_errors else [peak_error]
+        closest_idx = min(range(len(early_slice)), key=lambda k: early_slice[k])
         arrival_window_slice = all_errors[closest_idx: closest_idx + arrival_window_steps]
         arrival_peak_error = max(arrival_window_slice) if arrival_window_slice else peak_error
         return arrival_peak_error, steady_state_error, peak_error
